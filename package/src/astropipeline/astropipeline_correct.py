@@ -116,7 +116,7 @@ def parse_wat_table(hdu, wat_df=pd.DataFrame()):
         wat_bin = ""
         for hdr_line in hdu.header:
             if ("WAT" + str(axis)) in hdr_line:
-                wat_bin = wat_bin + hdu.header[hdr_line]
+                wat_bin = wat_bin + hdu.header[hdr_line] + " "
 
         this_row = len(wat_df)
         wat_df.loc[this_row, "wtype"] = re.search(r"wtype=(\w+)",
@@ -124,8 +124,8 @@ def parse_wat_table(hdu, wat_df=pd.DataFrame()):
         wat_df.loc[this_row, "axtype"] = re.search(r"axtype=(\w+)",
                                                    wat_bin).group(1)
         wat_df.loc[this_row, "dc_vals"] = re.search(
-            r'[lngcor|latcor] = "([^"]*)"', wat_bin
-        ).group(1)
+            r'(lngcor|latcor) = "([^"]*)"', wat_bin
+        ).group(2)
 
     return wat_df
 

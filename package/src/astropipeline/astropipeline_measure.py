@@ -51,13 +51,13 @@ class MeasureSettings:
     def load_from_file(self, settings_file_path):
         with open(settings_file_path) as f:
             file_vals = yaml.safe_load(f)
-        self = self.__dict__.update(**file_vals)
+        self.__dict__.update(**file_vals)
         return self
 
     def save_to_file(self, file_path):
-        yaml.dump(self.__dict__, file_path,
-                  default_flow_style=False,
-                  sort_keys=False)
+        with open(file_path, 'w') as f:
+            yaml.dump(self.__dict__, f,
+                      default_flow_style=False, sort_keys=False)
         return
 
 
@@ -137,7 +137,7 @@ def wdec_bandpass_find(
     found_coords = list()
 
     # loop over details (1 is lowest res details, -1 is highest res details)
-    for lvl in range(1, stop_level - start_level + 2, 1):
+    for lvl in range(1, len(wdecCoeffs)):
 
         # get V and H and D coefficients at lvl
         lvl_pass = emptyCoeffs.copy()
@@ -165,7 +165,9 @@ def wdec_bandpass_find(
     for lvl in range(-1, -start_level, -1):
         wdecCoeffs[lvl] = tuple([np.zeros_like(v) for v in wdecCoeffs[lvl]])
 
+    # reconstruct the bandpassed image
     bandpass_img = pywt.waverec2(wdecCoeffs, wavelet)
+    bandpass_img = bandpass_img[:image.shape[0], :image.shape[1]]
 
     return found_coords, bandpass_img
 
@@ -437,10 +439,9 @@ def background_sample_2d(raw_array, exp_locn, buffer_len):
 
     """
 
-    background_vals = raw_array[
-        np.abs(np.arange(0, raw_array.shape[0]) - exp_locn[0]) > buffer_len[0],
-        np.abs(np.arange(0, raw_array.shape[1]) - exp_locn[1]) > buffer_len[1],
-    ]
+    C, R = np.meshgrid(np.arange(raw_array.shape[1]), np.arange(raw_array.shape[0]))
+    mask = (np.abs(R - exp_locn[0]) > buffer_len[0]) & (np.abs(C - exp_locn[1]) > buffer_len[1])
+    background_vals = raw_array[mask]
 
     background_stats = (np.mean(background_vals), np.std(background_vals))
 
@@ -495,15 +496,20 @@ def get_adjacent_pixels(
         adjacent_pixels (ndarray): an array of pixels
                         of size (2*exent+1,2*extent+1)
     """
+    start_r = max(0, exp_locn[0] - extent[0])
+    end_r = min(raw_array.shape[0], exp_locn[0] + extent[0] + 1)
+    start_c = max(0, exp_locn[1] - extent[1])
+    end_c = min(raw_array.shape[1], exp_locn[1] + extent[1] + 1)
+    
     adjacent_pixels = copy.deepcopy(
-        raw_array[
-            (exp_locn[0] - extent[0]):(exp_locn[0] + extent[0] + 1),
-            (exp_locn[1] - extent[1]):(exp_locn[1] + extent[1] + 1),
-        ]
+        raw_array[start_r:end_r, start_c:end_c]
     )
 
     if remove_mid:
-        adjacent_pixels[extent[0], extent[1]] = np.nan
+        mid_r = exp_locn[0] - start_r
+        mid_c = exp_locn[1] - start_c
+        if 0 <= mid_r < adjacent_pixels.shape[0] and 0 <= mid_c < adjacent_pixels.shape[1]:
+            adjacent_pixels[mid_r, mid_c] = np.nan
 
     return adjacent_pixels
 
@@ -927,7 +933,8 @@ def extract_star_samples(fits_path, extensions=-1):
                 )
 
         # Define extent of pixels to crop around the each point
-        extent = np.ceil(2**(best_dog_lvl+1), 2**(best_dog_lvl+1))
+        ext_val = int(np.ceil(2**(best_lvl+1)))
+        extent = (ext_val, ext_val)
         num_peaks = 10
 
         # Find the top 10 strongest responses in the best DoG
