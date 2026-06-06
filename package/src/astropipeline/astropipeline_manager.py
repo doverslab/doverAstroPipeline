@@ -106,6 +106,8 @@ def correct_subpipe(study_df):
 
     return study_df
 
+# def star_extract_subpipe(study_df):
+
 
 def undistort_subpipe(study_df):
 

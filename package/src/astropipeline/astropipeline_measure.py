@@ -1,8 +1,64 @@
 import copy
 import pandas as pd
 import numpy as np
+import yaml
 import pywt
 from scipy import ndimage
+from astropy.io import fits
+
+
+class MeasureSettings:
+    """
+    Class to store settings for astro measurements
+
+    Attributes:
+        blur_radius (float): pixels of PSF radius
+        crop_extent (float): pixel extent to crop when taking samples
+                            (half of square edge length)
+        wavelet (str): Name of wavelet to use for decomposition and transforms
+        min_separation (float): Pixel distance required for two points to be
+                                unique
+        filter_mode (str): Mode used in decomposition functions (wavelet, fft)
+        mra_method (std): Filtering method for multi-resolution analysis
+        min_point_snr (float): SNR threshold for point features. 
+        min_mra_level (float): Highest resolution (least decomposition) level
+        max_mra_level (float): Lowest resolution (most decomposition) level
+        max_snr_points (int): Number of points to use when automatically
+                                adjusting filtering scheme with SNR
+        cold_pxl_thresh (float): Number of standard deviations below the mean
+                                 a pixel must be in order to be deemed "cold"
+        hot_bias_tolerance (float): Max allowable ratio between a pixel and its
+                                    maximum-valued neighbor. Any pixel with a
+                                    ratio to its largest neighbor exceeding
+                                    this will be deemed "hot".
+    """
+
+    def __init__(self):
+        # Method to instantiate Measure settings
+        self.psf_radius: float = 0.5
+        self.crop_extent: float = 3.
+        self.min_separation: float = 3.
+        self.wavelet: str = 'haar'
+        self.fitler_mode: str = 'reflect'
+        self.mra_method: str = 'dog'
+        self.min_point_snr: float = 3.
+        self.min_mra_level: float = 0.
+        self.max_mra_level: float = 3.
+        self.max_snr_points: int = 10
+        self.cold_pxl_thresh: float = 3.0
+        self.hot_bias_tolerance: float = 0.5
+
+    def load_from_file(self, settings_file_path):
+        with open(settings_file_path) as f:
+            file_vals = yaml.safe_load(f)
+        self = self.__dict__.update(**file_vals)
+        return self
+
+    def save_to_file(self, file_path):
+        yaml.dump(self.__dict__, file_path,
+                  default_flow_style=False,
+                  sort_keys=False)
+        return
 
 
 def crop_fits(fits_img, center_x_y, window_size):
@@ -65,9 +121,9 @@ def wdec_bandpass_find(
     """
 
     wdecCoeffs = pywt.wavedec2(image,
-                               wavelet=wavelet,
-                               mode="reflect",
+                               wavelet=wavelet, mode="reflect",
                                level=stop_level)
+
     emptyCoeffs = pywt.wavedec2(
         np.zeros_like(image), wavelet=wavelet, mode="reflect", level=stop_level
     )
@@ -86,8 +142,9 @@ def wdec_bandpass_find(
         # get V and H and D coefficients at lvl
         lvl_pass = emptyCoeffs.copy()
         detail_sum = np.sum(np.square(wdecCoeffs[lvl]), axis=0)
-        one_hot_details = detail_sum >= \
-            np.partition(detail_sum.flatten(), -3)[-3]
+        one_hot_details = detail_sum >= np.partition(detail_sum.flatten(),
+                                                     -3)[-3]
+
         lvl_pass[lvl] = tuple([one_hot_details for details in lvl_pass[lvl]])
 
         # determine the coordinate scaling based on level
@@ -113,12 +170,9 @@ def wdec_bandpass_find(
     return found_coords, bandpass_img
 
 
-def swt_bandpass(
-    image: np.array,
-    wavelet: str = "haar",
-    hi_level: int = 0,
-    lo_level: int = 3
-):
+def swt_bandpass(image: np.array, wavelet: str = "haar",
+                 hi_level: int = 0,
+                 lo_level: int = 3):
     """
     Apply stationary wavelet bandpass filter
 
@@ -147,8 +201,7 @@ def swt_bandpass(
 
     buffered_image = np.pad(
         image, pad_width=((0, buffer_addn[0]), (0, buffer_addn[1])),
-        mode="reflect"
-    )
+        mode="reflect")
 
     swtCoeffs = pywt.swt2(
         buffered_image,
@@ -167,8 +220,7 @@ def swt_bandpass(
 
 
 def swt_enhance(
-    image: np.array,
-    wavelet: list = "exhaustive",
+    image: np.array, wavelet: list = "exhaustive",
     max_level: int = 3,
     approx_level=-1
 ):
@@ -210,8 +262,7 @@ def swt_enhance(
     buffer_addn = buffered_size - np.shape(image)
 
     buffered_image = np.pad(
-        image,
-        pad_width=((0, buffer_addn[0]), (0, buffer_addn[1])),
+        image, pad_width=((0, buffer_addn[0]), (0, buffer_addn[1])),
         mode="reflect"
     )
 
@@ -250,19 +301,21 @@ def swt_enhance(
 
             # reconstruct the approximation for the given level
             swt_approx = pywt.iswt2(
-                (swt_low_pass, (scA_lvl[0] * 0, scA_lvl[0] * 0, scA_lvl[0] * 0)
+                (swt_low_pass,
+                 (scA_lvl[0] * 0, scA_lvl[0] * 0, scA_lvl[0] * 0)
                  ),
                 wavelet=wave,
                 norm=True,
             )[orig_row_slice, orig_col_slice]
 
             # subtract the approximation (low pass) to get the high pass
-            swt_output = buffered_image[orig_row_slice, orig_col_slice] - \
-                swt_approx
+            swt_output = buffered_image[orig_row_slice,
+                                        orig_col_slice] - swt_approx
 
             # find the maximum contrast's Z-score
-            effective_contrast = (np.max(swt_output) - np.mean(swt_output)) /\
-                np.std(swt_output)
+            effective_contrast = (
+                np.max(swt_output) - np.mean(swt_output)
+                ) / np.std(swt_output)
 
             # store the information in the results dataframe
             results.loc[lvl, wave] = effective_contrast
@@ -335,8 +388,9 @@ def background_sample_1d(raw_array, exp_locn, buffer_len):
     """
     sample_locations = np.array(range(0, len(raw_array), 1))
 
-    background_vals = raw_array[np.abs(sample_locations - exp_locn) >
-                                buffer_len]
+    background_vals = raw_array[
+        np.abs(sample_locations - exp_locn) > buffer_len
+        ]
 
     background_stats = (np.mean(background_vals), np.std(background_vals))
 
@@ -393,7 +447,7 @@ def background_sample_2d(raw_array, exp_locn, buffer_len):
     return background_stats
 
 
-def dog_2d(raw_array, sigma_hi=1, sigma_lo=2, mode='reflect'):
+def dog_2d(raw_array, sigma_hi=1, sigma_lo=2, mode="reflect"):
     """
     Perform a bandpass using a difference-of-gaussians
 
@@ -418,10 +472,12 @@ def dog_2d(raw_array, sigma_hi=1, sigma_lo=2, mode='reflect'):
     return dog_array
 
 
-def get_adjacent_pixels(raw_array: np.ndarray,
+def get_adjacent_pixels(
+                        raw_array: np.ndarray,
                         exp_locn: int,
                         extent: int = (1, 1),
                         remove_mid: bool = True):
+
     """
     Get all pixels within a certain extent of a specific point
 
@@ -439,9 +495,12 @@ def get_adjacent_pixels(raw_array: np.ndarray,
         adjacent_pixels (ndarray): an array of pixels
                         of size (2*exent+1,2*extent+1)
     """
-    adjacent_pixels = copy.deepcopy(raw_array[
-        (exp_locn[0]-extent[0]):(exp_locn[0]+extent[0]+1),
-        (exp_locn[1]-extent[1]):(exp_locn[1]+extent[1]+1)])
+    adjacent_pixels = copy.deepcopy(
+        raw_array[
+            (exp_locn[0] - extent[0]):(exp_locn[0] + extent[0] + 1),
+            (exp_locn[1] - extent[1]):(exp_locn[1] + extent[1] + 1),
+        ]
+    )
 
     if remove_mid:
         adjacent_pixels[extent[0], extent[1]] = np.nan
@@ -568,9 +627,9 @@ def repair_cold_pixels(array, min_threshold):
 
         bg_stats_global = (np.mean(array), np.std(array))
 
-        adjacent_pixels = get_adjacent_pixels(array,
-                                              (min_row, min_col),
-                                              remove_mid=True)
+        adjacent_pixels = get_adjacent_pixels(
+            array, (min_row, min_col), remove_mid=True
+        )
 
         bg_stats_local = (np.nanmean(adjacent_pixels),
                           np.nanstd(adjacent_pixels))
@@ -586,10 +645,10 @@ def repair_cold_pixels(array, min_threshold):
         pixel_zscore_local = (
             array[min_row, min_col] - bg_stats_local[0]
         ) / bg_stats_local[1]
-        print("--current pixel z-score (global): {:.2f}"
-              .format(pixel_zscore_global))
-        print("--current pixel z-score (local): {:.2f}"
-              .format(pixel_zscore_local))
+        print("--current pixel z-score (global): {:.2f}".format(
+            pixel_zscore_global))
+        print("--current pixel z-score (local): {:.2f}".format(
+            pixel_zscore_local))
 
         pixel_flag = pixel_check_cold(
             array, [min_row, min_col], min_threshold=min_threshold
@@ -602,7 +661,9 @@ def repair_cold_pixels(array, min_threshold):
     return array
 
 
-def create_psf(array_size=(21, 21), impulse_amplitude=1, sigma=1,
+def create_psf(array_size=(21, 21),
+               impulse_amplitude=1,
+               sigma=1,
                noise_amplitde=0):
     """
     Create a pseudo point spread function (PSF)
@@ -618,10 +679,10 @@ def create_psf(array_size=(21, 21), impulse_amplitude=1, sigma=1,
         psf_array: 2D array of simulated pixel values for the PSF
     """
     response_array = np.zeros(array_size)
-    response_array[array_size[0]//2, array_size[1]//2] = impulse_amplitude
+    response_array[array_size[0] // 2, array_size[1] // 2] = impulse_amplitude
     response_array = ndimage.gaussian_filter(response_array, sigma=sigma)
-    noise_array = noise_amplitde*np.random.rand(array_size[0], array_size[1])
-    psf_array = response_array+noise_array
+    noise_array = noise_amplitde * np.random.rand(array_size[0], array_size[1])
+    psf_array = response_array + noise_array
 
     return psf_array
 
@@ -643,20 +704,22 @@ def get_centroid(array, exp_loc=-1, extent=-1):
     """
     # if no expected location is given, assume the center of the array
     if exp_loc == -1:
-        exp_loc = (array.shape[0]//2, array.shape[1]//2)
+        exp_loc = (array.shape[0] // 2, array.shape[1] // 2)
     else:
         exp_loc = (round(exp_loc[0]), round(exp_loc[1]))
 
     # if no extent is given, assume the entire array
     if extent == -1:
-        extent = (array.shape[0]//2, array.shape[1]//2)
+        extent = (array.shape[0] // 2, array.shape[1] // 2)
         correction_apply = 0
     else:
         extent = (extent, extent)
 
         # crop the array
-        array = array[(exp_loc[0]-extent[0]):(exp_loc[0]+extent[0]+1),
-                      (exp_loc[1]-extent[1]):(exp_loc[1]+extent[1]+1)]
+        array = array[
+            (exp_loc[0] - extent[0]):(exp_loc[0] + extent[0] + 1),
+            (exp_loc[1] - extent[1]):(exp_loc[1] + extent[1] + 1),
+        ]
 
         # flag to later correct the output indexes to original coordinates
         correction_apply = 1
@@ -667,15 +730,15 @@ def get_centroid(array, exp_loc=-1, extent=-1):
 
     # multiply summed columns by row locations to get row centroid
     row_centroid = (
-        np.sum(np.multiply(row_locs, np.sum(array, axis=1))
-               ) / np.sum(array) - 1
-    ) - (extent[0] + exp_loc[0])*correction_apply
+        np.sum(np.multiply(row_locs, np.sum(array, axis=1)))
+        / np.sum(array) - 1
+    ) - (extent[0] + exp_loc[0]) * correction_apply
 
     # multiply summed rows by col locations to get col centroid
     col_centroid = (
-        np.sum(np.multiply(col_locs, np.sum(array, axis=0))
-               ) / np.sum(array) - 1
-    ) - (extent[1] + exp_loc[1])*correction_apply
+        np.sum(np.multiply(col_locs, np.sum(array, axis=0)))
+        / np.sum(array) - 1
+    ) - (extent[1] + exp_loc[1]) * correction_apply
 
     return row_centroid, col_centroid
 
@@ -695,8 +758,8 @@ def get_pix_distances(array, exp_locn):
     """
     C, R = np.meshgrid(np.arange(0, array.shape[0]),
                        np.arange(0, array.shape[1]))
-    distances = np.sqrt(np.square(R-exp_locn[0]) +
-                        np.square(C-exp_locn[1]))
+    distances = np.sqrt(np.square(R - exp_locn[0])
+                        + np.square(C - exp_locn[1]))
 
     return distances, C, R
 
@@ -712,9 +775,8 @@ def get_border_stats(array):
         border_stats (list): mean and standard deviation of border values
     """
     border_vals = np.concatenate(
-        (np.ravel(array[[0, -1],]),
-         np.ravel(array[1:-1, [0, -1]]))
-        )
+        (np.ravel(array[[0, -1],]), np.ravel(array[1:-1, [0, -1]]))
+    )
 
     border_mean = np.mean(border_vals)
     border_std = np.std(border_vals)
@@ -722,3 +784,215 @@ def get_border_stats(array):
     border_stats = [border_mean, border_std]
 
     return border_stats
+
+
+def adjust_guess_location(array, r_guess, c_guess, extent):
+    # Crop out the values around the point of interest
+    local_pixels_raw = get_adjacent_pixels(array,
+                                           (r_guess, c_guess),
+                                           extent=extent,
+                                           remove_mid=False)
+
+    # Recenter sample if DoG's max isn't the unfiltered max
+    if np.max(local_pixels_raw) > array[r_guess, c_guess]:
+        max_local = np.unravel_index(
+            np.argmax(local_pixels_raw),
+            local_pixels_raw.shape)
+        r_update, c_update = np.add(
+            [r_guess, c_guess],
+            np.subtract(max_local, extent)
+            )
+    else:
+        r_update = r_guess
+        c_update = c_guess
+
+    return r_update, c_update
+
+
+def get_unique_points(coords: tuple,
+                      num_required: int = 10,
+                      extent: float = 10):
+    # After the first point, make sure the next points are spatially unique
+    coords_iter = iter(zip(coords[0], coords[1]))
+
+    # the first point is guaranteed to be unique
+    unique_coord_list = [(next(coords_iter))]
+
+    while len(unique_coord_list) < num_required:
+        try:
+            next_coords = next(coords_iter)
+        except StopIteration:
+            break
+
+        l2_dist = np.linalg.norm(
+            np.subtract(np.array(unique_coord_list), np.array(next_coords)),
+            axis=1)
+        if np.min(l2_dist) < np.max(extent):
+            continue
+        else:
+            unique_coord_list.append(next_coords)
+
+    return unique_coord_list
+
+
+def get_best_dog(img, min_layer: int = 0,
+                 max_layer: int = 3,
+                 max_samples: int = 10,
+                 sample_extent: int = 10):
+
+    # Grab the coords of the maximum values
+    raw_coords = np.unravel_index(
+        np.argsort(img.flatten())[::-1],
+        img.shape)
+
+    # Remove spatially adjacent max points
+    raw_max_vals = get_unique_points(raw_coords,
+                                     num_required=max_samples,
+                                     extent=sample_extent)
+
+    # Initialize the best level and SNR values
+    best_lvl = -1
+    best_snr = 0
+
+    # Loop over DoG level
+    for lvl in range(min_layer, max_layer, 1):
+
+        # Grab the bandpass result
+        crop_dog_lvl = dog_2d(img,
+                              sigma_hi=lvl,
+                              sigma_lo=(lvl+1),
+                              mode='reflect'
+                              )
+
+        # calculate extents based on gaussian level
+        extents = np.ceil(np.array([2*(lvl+1), 2*(lvl+1)]))
+
+        # initialize snr sum
+        lvl_snr = 0
+
+        for max_row, max_col in raw_max_vals:
+            # Calculate the background stats
+            lvl_norm_array = norm_array(crop_dog_lvl)
+
+            bg_stats_lvl = background_sample_2d(lvl_norm_array,
+                                                (max_row, max_col),
+                                                extents)
+
+            # Calculate the SNR as the statistical Z-score on the norm. array
+            lvl_snr += (lvl_norm_array[max_row, max_col]
+                        - bg_stats_lvl[0])/bg_stats_lvl[1]
+
+        # Store the best score and level
+        if lvl_snr > best_snr:
+            best_snr = lvl_snr
+            best_lvl = lvl
+
+    return best_lvl
+
+
+def extract_star_samples(fits_path, extensions=-1):
+    fits_hdul = fits.open(fits_path)
+
+    if extensions == -1:
+        extension_list = [index for index, x
+                          in enumerate(fits_hdul)
+                          if isinstance(x, fits.CompImageHDU)]
+    else:
+        extension_list = extensions
+
+    for ext in extension_list:
+
+        img = fits_hdul[ext].data
+        # remove negative pixels
+        img[img < 0] = (0)
+
+        fits_hdul.close()
+
+        clean_img = repair_hot_pixels(img)
+
+        clean_img = repair_cold_pixels(clean_img, min_threshold=3)
+
+        # find DoG level with best SNR
+        best_lvl = get_best_dog(img,
+                                min_layer=0, max_layer=3,
+                                max_samples=10,
+                                sample_extent=10)
+
+        # Apply the highest SNR DoG to the entire image
+        best_dog_lvl = dog_2d(
+                clean_img,
+                sigma_hi=best_lvl,
+                sigma_lo=(best_lvl + 1),
+                mode="reflect"
+                )
+
+        # Define extent of pixels to crop around the each point
+        extent = np.ceil(2**(best_dog_lvl+1), 2**(best_dog_lvl+1))
+        num_peaks = 10
+
+        # Find the top 10 strongest responses in the best DoG
+        rmax_dog, cmax_dog = np.unravel_index(
+            np.argsort(best_dog_lvl.flatten())[-num_peaks:], best_dog_lvl.shape
+        )
+
+        # Loop over the strongest responses
+        for i in range(0, len(rmax_dog), 1):
+
+            # Verify this point is unique from previous points
+            if i > 0:
+                l2_dist = np.linalg.norm(
+                    np.array([rmax_dog[0:i] - rmax_dog[i],
+                              cmax_dog[0:i] - cmax_dog[i]]),
+                    axis=0,
+                )
+                if np.min(l2_dist) < 2 * np.max(extent):
+                    continue
+
+            # Crop out the values around the point of interest
+            local_pixels_raw = get_adjacent_pixels(
+                                img,
+                                (rmax_dog[i], cmax_dog[i]),
+                                extent=extent,
+                                remove_mid=False
+                                )
+
+            # Recenter sample if DoG's max isn't the unfiltered max
+            if np.max(local_pixels_raw) > img[rmax_dog[i], cmax_dog[i]]:
+                max_local = np.unravel_index(
+                    np.argmax(local_pixels_raw), local_pixels_raw.shape
+                )
+                rmax_new, cmax_new = np.add(
+                    [rmax_dog[i], cmax_dog[i]], np.subtract(max_local, extent)
+                )
+                local_pixels_raw = get_adjacent_pixels(
+                    img, (rmax_new, cmax_new), extent=extent, remove_mid=False
+                )
+
+            # Get a statistical measurement of the local background
+            border_stats = get_border_stats(local_pixels_raw)
+
+            # Set a threshold based on the background stats
+            # TODO - replace variable
+            thresh = border_stats[0] + 3 * border_stats[1]
+
+            # Mask the pixels above the threshold
+            mask = np.ma.masked_where(local_pixels_raw >= thresh,
+                                      local_pixels_raw)
+
+            # Zero out pixels below threshold before centroid calculation
+            mask.data[mask.mask is False] = 0
+
+            # Estimate the object's centroid
+            centroid_locn = get_centroid(mask.data, extent=-1)
+
+            # Compute the pixel distances from the centroid
+            pix_distances, X, Y = get_pix_distances(
+                local_pixels_raw, exp_locn=(centroid_locn[0], centroid_locn[1])
+            )
+
+            # Calculate the integrated counts
+            integrated_counts = np.sum(
+                local_pixels_raw[mask.mask is True] - border_stats[0]
+            )
+
+        # TODO - configure outputs for next step

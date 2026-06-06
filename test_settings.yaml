@@ -1,0 +1,12 @@
+psf_radius: 0.5
+crop_radius: 3.0
+min_separation: 3.0
+wavelet: haar
+fitler_mode: reflect
+mra_method: dog
+min_point_snr: 3.0
+min_mra_layer: 0.0
+max_mra_layer: 3.0
+max_snr_points: 10
+cold_pxl_thresh: 3.0
+hot_bias_tolerance: 0.5

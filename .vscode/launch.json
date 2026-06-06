@@ -1,4 +1,5 @@
 {
+    "version": "0.2.0",
     "configurations": [
         {
             "name": "Python Debugger: Current File",
@@ -6,6 +7,13 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "console": "internalConsole",
+            "justMyCode": false
         },
         {
             "name": "Docker: Python - General",
