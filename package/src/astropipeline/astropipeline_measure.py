@@ -34,7 +34,7 @@ class MeasureSettings:
     """
 
     def __init__(self):
-        # Method to instantiate Measure settings
+        """Method to instantiate Measure settings."""
         self.psf_radius: float = 0.5
         self.crop_extent: float = 3.
         self.min_separation: float = 3.
@@ -585,32 +585,35 @@ def repair_hot_pixels(array):
     Returns:
         array (ndarray): A numpy nxm float array with hot pixels removed
     """
-    pixel_flag = 1
+    bg_mean = np.nanmean(array)
+    bg_std = np.nanstd(array)
+    if bg_std == 0:
+        bg_std = 1.0
 
-    while pixel_flag == 1:
+    thresh = bg_mean + 3.0 * bg_std
+    outlier_mask = array > thresh
+    if not np.any(outlier_mask):
+        return array
 
-        max_row, max_col = np.unravel_index(np.argmax(array), array.shape)
+    outlier_indices = np.argwhere(outlier_mask)
+    outlier_values = array[outlier_mask]
 
-        bg_stats = (np.mean(array), np.std(array))
+    # Sort outliers in descending order
+    sort_idx = np.argsort(outlier_values)[::-1]
+    sorted_coords = outlier_indices[sort_idx]
 
-        # output information about replacement process
-        print("max pixel location: {:.2f}, {:.2f}".format(max_row, max_col))
-        print("mean pixel value: {:.2f}".format(bg_stats[0]))
-        print("std of pixel value: {:.2f}".format(bg_stats[1]))
-        print("--current max value: {:.2f}".format(array[max_row, max_col]))
-        pixel_zscore = (array[max_row, max_col] - bg_stats[0]) / bg_stats[1]
-        print("--current pixel z-score: {:.2f}".format(pixel_zscore))
+    print(f"Checking {len(sorted_coords)} potential hot pixel outliers...")
 
-        pixel_flag = pixel_check_hot(array,
-                                     [max_row, max_col],
-                                     bg_stats=bg_stats)
-
+    for row, col in sorted_coords:
+        val = array[row, col]
+        pixel_flag = pixel_check_hot(array, [row, col], bg_stats=(bg_mean, bg_std))
         if pixel_flag == 1:
-            array[max_row, max_col] = np.nanmean(
-                get_adjacent_pixels(array,
-                                    exp_locn=(max_row, max_col),
-                                    remove_mid=True)
-            )
+            adjacent = get_adjacent_pixels(array, exp_locn=(row, col), remove_mid=True)
+            new_val = np.nanmean(adjacent)
+            array[row, col] = new_val
+            print("Repaired hot pixel at location: {:.2f}, {:.2f} (value: {:.2f} -> {:.2f})".format(row, col, val, new_val))
+        else:
+            break
 
     return array
 
@@ -625,44 +628,35 @@ def repair_cold_pixels(array, min_threshold):
     Returns:
         array (ndarray): A numpy nxm float array with cold pixels removed
     """
-    pixel_flag = 1
+    bg_mean = np.nanmean(array)
+    bg_std = np.nanstd(array)
+    if bg_std == 0:
+        bg_std = 1.0
 
-    while pixel_flag == 1:
+    thresh = bg_mean - min_threshold * bg_std
+    outlier_mask = array < thresh
+    if not np.any(outlier_mask):
+        return array
 
-        min_row, min_col = np.unravel_index(np.argmin(array), array.shape)
+    outlier_indices = np.argwhere(outlier_mask)
+    outlier_values = array[outlier_mask]
 
-        bg_stats_global = (np.mean(array), np.std(array))
+    # Sort outliers in ascending order
+    sort_idx = np.argsort(outlier_values)
+    sorted_coords = outlier_indices[sort_idx]
 
-        adjacent_pixels = get_adjacent_pixels(
-            array, (min_row, min_col), remove_mid=True
-        )
+    print(f"Checking {len(sorted_coords)} potential cold pixel outliers...")
 
-        bg_stats_local = (np.nanmean(adjacent_pixels),
-                          np.nanstd(adjacent_pixels))
-
-        # output information about replacement process
-        print("min pixel location: {:.2f}, {:.2f}".format(min_row, min_col))
-        print("mean pixel value (global): {:.2f}".format(bg_stats_global[0]))
-        print("std of pixel value (global): {:.2f}".format(bg_stats_global[1]))
-        print("--current min value: {:.2f}".format(array[min_row, min_col]))
-        pixel_zscore_global = (
-            array[min_row, min_col] - bg_stats_global[0]
-        ) / bg_stats_global[1]
-        pixel_zscore_local = (
-            array[min_row, min_col] - bg_stats_local[0]
-        ) / bg_stats_local[1]
-        print("--current pixel z-score (global): {:.2f}".format(
-            pixel_zscore_global))
-        print("--current pixel z-score (local): {:.2f}".format(
-            pixel_zscore_local))
-
-        pixel_flag = pixel_check_cold(
-            array, [min_row, min_col], min_threshold=min_threshold
-        )
-
+    for row, col in sorted_coords:
+        val = array[row, col]
+        pixel_flag = pixel_check_cold(array, [row, col], min_threshold=min_threshold)
         if pixel_flag == 1:
-
-            array[min_row, min_col] = np.nanmean(adjacent_pixels)
+            adjacent = get_adjacent_pixels(array, (row, col), remove_mid=True)
+            new_val = np.nanmean(adjacent)
+            array[row, col] = new_val
+            print("Repaired cold pixel at location: {:.2f}, {:.2f} (value: {:.2f} -> {:.2f})".format(row, col, val, new_val))
+        else:
+            break
 
     return array
 
@@ -896,23 +890,32 @@ def get_best_dog(img, min_layer: int = 0,
     return best_lvl
 
 
-def extract_star_samples(fits_path, extensions=-1):
-    fits_hdul = fits.open(fits_path)
+def extract_star_samples(fits_path, extensions=-1, num_peaks=10):
+    from astropy.io import fits
+
+    if isinstance(fits_path, str):
+        fits_hdul = fits.open(fits_path)
+        close_fd = True
+    elif isinstance(fits_path, fits.HDUList):
+        fits_hdul = fits_path
+        close_fd = False
+    else:
+        fits_hdul = fits.HDUList([fits_path])
+        close_fd = False
 
     if extensions == -1:
         extension_list = [index for index, x
                           in enumerate(fits_hdul)
-                          if isinstance(x, fits.CompImageHDU)]
+                          if isinstance(x, (fits.CompImageHDU, fits.ImageHDU, fits.PrimaryHDU)) and x.data is not None and x.data.size > 0]
     else:
-        extension_list = extensions
+        extension_list = extensions if isinstance(extensions, list) else [extensions]
 
+    results = {}
     for ext in extension_list:
 
         img = fits_hdul[ext].data
         # remove negative pixels
         img[img < 0] = (0)
-
-        fits_hdul.close()
 
         clean_img = repair_hot_pixels(img)
 
@@ -935,13 +938,13 @@ def extract_star_samples(fits_path, extensions=-1):
         # Define extent of pixels to crop around the each point
         ext_val = int(np.ceil(2**(best_lvl+1)))
         extent = (ext_val, ext_val)
-        num_peaks = 10
 
-        # Find the top 10 strongest responses in the best DoG
+        # Find the top N strongest responses in the best DoG
         rmax_dog, cmax_dog = np.unravel_index(
             np.argsort(best_dog_lvl.flatten())[-num_peaks:], best_dog_lvl.shape
         )
 
+        stars_in_ext = []
         # Loop over the strongest responses
         for i in range(0, len(rmax_dog), 1):
 
@@ -964,15 +967,17 @@ def extract_star_samples(fits_path, extensions=-1):
                                 )
 
             # Recenter sample if DoG's max isn't the unfiltered max
+            r_center = rmax_dog[i]
+            c_center = cmax_dog[i]
             if np.max(local_pixels_raw) > img[rmax_dog[i], cmax_dog[i]]:
                 max_local = np.unravel_index(
                     np.argmax(local_pixels_raw), local_pixels_raw.shape
                 )
-                rmax_new, cmax_new = np.add(
+                r_center, c_center = np.add(
                     [rmax_dog[i], cmax_dog[i]], np.subtract(max_local, extent)
                 )
                 local_pixels_raw = get_adjacent_pixels(
-                    img, (rmax_new, cmax_new), extent=extent, remove_mid=False
+                    img, (r_center, c_center), extent=extent, remove_mid=False
                 )
 
             # Get a statistical measurement of the local background
@@ -984,7 +989,7 @@ def extract_star_samples(fits_path, extensions=-1):
 
             # Mask the pixels above the threshold
             mask = np.ma.masked_where(local_pixels_raw >= thresh,
-                                      local_pixels_raw)
+                                       local_pixels_raw)
 
             # Zero out pixels below threshold before centroid calculation
             mask.data[mask.mask is False] = 0
@@ -1002,4 +1007,19 @@ def extract_star_samples(fits_path, extensions=-1):
                 local_pixels_raw[mask.mask is True] - border_stats[0]
             )
 
-        # TODO - configure outputs for next step
+            start_r = max(0, r_center - extent[0])
+            start_c = max(0, c_center - extent[1])
+            abs_row = start_r + centroid_locn[0]
+            abs_col = start_c + centroid_locn[1]
+
+            stars_in_ext.append({
+                'row': abs_row,
+                'col': abs_col,
+                'counts': integrated_counts
+            })
+        results[ext] = stars_in_ext
+
+    if close_fd:
+        fits_hdul.close()
+
+    return results

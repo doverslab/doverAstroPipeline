@@ -71,56 +71,41 @@ def test_correct_subpipe(
 
 
 @patch("package.src.astropipeline.astropipeline_manager.fits.open")
-@patch("package.src.astropipeline.astropipeline_manager.WCS")
+@patch("package.src.astropipeline.astropipeline_manager.aplc.rectify_image")
 @patch("package.src.astropipeline.astropipeline_manager.aple.get_catalog_stars")
-@patch("package.src.astropipeline.astropipeline_manager.SkyCoord")
-@patch("package.src.astropipeline.astropipeline_manager.Cutout2D")
-@patch("package.src.astropipeline.astropipeline_manager.plt")
-@patch("package.src.astropipeline.astropipeline_manager.aplm.wdec_bandpass_find")
+@patch("package.src.astropipeline.astropipeline_manager.os.path.exists")
 def test_undistort_subpipe(
-    mock_wdec, mock_plt, mock_cutout, mock_skycoord, mock_catalog, mock_wcs, mock_fits_open, mock_study_df
+    mock_exists, mock_catalog, mock_rectify, mock_fits_open, mock_study_df
 ):
-    # Setup mocks
-    # We need a primary HDU (skipped) and a CompImageHDU (processed)
-    mock_primary_hdu = MagicMock(spec=fits.PrimaryHDU)
+    def exists_side_effect(path):
+        return "rectified" not in str(path)
+    mock_exists.side_effect = exists_side_effect
     
-    mock_image_hdu = MagicMock()
+    mock_primary_hdu = MagicMock(spec=fits.PrimaryHDU)
+    mock_primary_hdu.data = None
+    mock_primary_hdu.header = {"NAXIS": 0, "EXTEND": True}
+    
+    mock_image_hdu = MagicMock(spec=fits.ImageHDU)
     mock_image_hdu.header = {"RADESYS": "ICRS"}
     mock_image_hdu.data = np.ones((100, 100))
     
-    mock_fits_open.return_value = [mock_primary_hdu, mock_image_hdu]
+    mock_hdulist = MagicMock()
+    mock_hdulist.__iter__.return_value = [mock_primary_hdu, mock_image_hdu]
+    mock_hdulist.__len__.return_value = 2
+    mock_fits_open.return_value = mock_hdulist
     
-    # Mock catalog
-    mock_catalog.return_value = pd.DataFrame([
-        {"ra": 10.0, "dec": 10.0},
-        {"ra": 20.0, "dec": 20.0}
-    ])
+    mock_catalog.return_value = pd.DataFrame([{"ra": 10.0, "dec": 10.0}])
+    mock_rectify.return_value = mock_image_hdu
     
-    # Mock SkyCoord containment
-    mock_coord_instance = MagicMock()
-    mock_coord_instance.contained_by.side_effect = [False, True]
-    mock_skycoord.return_value = mock_coord_instance
+    with patch("astropy.io.fits.HDUList.writeto") as mock_writeto:
+        result = aplmgr.undistort_subpipe(mock_study_df.copy(), method="wcs")
     
-    # Mock Cutout
-    mock_cutout_instance = MagicMock()
-    mock_cutout_instance.data = np.ones((10, 10))
-    mock_cutout.return_value = mock_cutout_instance
-    
-    # Mock wdec
-    mock_wdec.return_value = (
-        [[1, 1.0, [5, 5]]],  # found_coords (list of lists)
-        np.ones((10, 10))    # img_passed
-    )
-
-    result = aplmgr.undistort_subpipe(mock_study_df)
-
-    assert result == 0
+    assert "rectified_path" in result.columns
     mock_fits_open.assert_called_once()
     mock_catalog.assert_called_once()
-    assert mock_skycoord.call_count == 2
-    mock_cutout.assert_called_once()
-    mock_wdec.assert_called_once()
-    mock_plt.show.assert_called_once()
+    mock_rectify.assert_called_once()
+    mock_writeto.assert_called_once()
+
 
 
 @patch("package.src.astropipeline.astropipeline_manager.aple.get_pipeline_df")
@@ -133,13 +118,52 @@ def test_correct_subpipe_cache_hit(
     mock_get_pipeline.return_value = mock_pipeline_df
     mock_paths = MagicMock()
     mock_paths.local_fits_path = "mock_local.fits"
+    mock_paths.pipe_file_path = "mock_pipe.csv"
     mock_pipe_paths.return_value = mock_paths
     
-    # Initialize a df where out_path is None to assert it remains unchanged (None)
+    # Initialize a df where out_path is None to assert it gets populated
     study_df = pd.DataFrame([{"id": 1, "out_path": None, "pipe_path": None}])
     result_df = aplmgr.correct_subpipe(study_df)
     assert len(result_df) == 1
-    assert pd.isna(result_df.iloc[0]["out_path"])
+    assert result_df.iloc[0]["out_path"] == "mock_local.fits"
+    assert result_df.iloc[0]["pipe_path"] == "mock_pipe.csv"
+
+
+@patch("package.src.astropipeline.astropipeline_manager.fits.open")
+@patch("package.src.astropipeline.astropipeline_manager.aplc.calibrate_flux")
+@patch("package.src.astropipeline.astropipeline_manager.aple.get_catalog_stars")
+@patch("package.src.astropipeline.astropipeline_manager.os.path.exists")
+def test_calibrate_flux_subpipe(
+    mock_exists, mock_catalog, mock_calibrate, mock_fits_open, mock_study_df
+):
+    def exists_side_effect(path):
+        return "calibrated" not in str(path)
+    mock_exists.side_effect = exists_side_effect
+    
+    mock_primary_hdu = MagicMock(spec=fits.PrimaryHDU)
+    mock_primary_hdu.data = None
+    mock_primary_hdu.header = {"NAXIS": 0, "EXTEND": True}
+    
+    mock_image_hdu = MagicMock(spec=fits.ImageHDU)
+    mock_image_hdu.header = {"RADESYS": "ICRS"}
+    mock_image_hdu.data = np.ones((100, 100))
+    
+    mock_hdulist = MagicMock()
+    mock_hdulist.__iter__.return_value = [mock_primary_hdu, mock_image_hdu]
+    mock_hdulist.__len__.return_value = 2
+    mock_fits_open.return_value = mock_hdulist
+    
+    mock_catalog.return_value = pd.DataFrame([{"ra": 10.0, "dec": 10.0}])
+    mock_calibrate.return_value = (mock_image_hdu, True)
+    
+    with patch("astropy.io.fits.HDUList.writeto") as mock_writeto:
+        result = aplmgr.calibrate_flux_subpipe(mock_study_df.copy())
+    
+    assert "calibrated_path" in result.columns
+    mock_fits_open.assert_called_once()
+    mock_catalog.assert_called_once()
+    mock_calibrate.assert_called_once()
+    mock_writeto.assert_called_once()
 
 
 def test_manager_main_block():
@@ -150,13 +174,16 @@ def test_manager_main_block():
     
     mock_paths = MagicMock()
     mock_paths.local_fits_path = "mock_local.fits"
+    mock_paths.pipe_file_path = "mock_pipe.csv"
     
-    # We will control the return value of os.path.exists using a list so we can mutate it
     exists_val = [True]
     def exists_side_effect(path):
+        if "rectified" in str(path):
+            return False
         if "apl_study" in str(path) or "dummy" in str(path) or "dover" in str(path):
             return exists_val[0]
         return True # For fits file cache hit
+        
         
     with patch("package.src.astropipeline.astropipeline_etl.get_study_file") as mock_get_study, \
          patch("package.src.astropipeline.astropipeline_etl.get_pipeline_df") as mock_get_pipeline, \
@@ -174,7 +201,7 @@ def test_manager_main_block():
         mock_pipe_paths.return_value = mock_paths
         mock_get_stars.return_value = pd.DataFrame() # empty catalog
         
-        mock_img_hdu = MagicMock()
+        mock_img_hdu = MagicMock(spec=fits.ImageHDU)
         mock_img_hdu.header = {"RADESYS": "ICRS"}
         mock_img_hdu.data = np.ones((10, 10))
         mock_fits_open.return_value = [fits.PrimaryHDU(), mock_img_hdu]

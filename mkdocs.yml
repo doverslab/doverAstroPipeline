@@ -1,0 +1,21 @@
+site_name: doverAstroPipeline
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [package/src]
+
+nav:
+  - Home: index.md
+  - Architecture & Workflows: architecture.md
+  - API Reference: api.md
+
+

@@ -1,3 +1,6 @@
+import os
+import hashlib
+from urllib.parse import urlparse
 import pandas as pd
 import requests
 from astroquery.simbad import Simbad
@@ -9,6 +12,57 @@ import astropy.units as u
 natroot = "https://astroarchive.noirlab.edu"
 baseurl = f"{natroot}/api/sia"
 adsurl = f"{natroot}/api/adv_search"
+
+_HEADER_CACHE = {}
+
+def cached_fits_open(url, **kwargs):
+    if not isinstance(url, str) or not (url.startswith("http://") or url.startswith("https://")):
+        return fits.open(url, **kwargs)
+        
+    cache_dir = os.path.join(os.getcwd(), "fits", "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    parsed_url = urlparse(url)
+    base_name = os.path.basename(parsed_url.path)
+    if not base_name:
+        base_name = hashlib.md5(url.encode('utf-8')).hexdigest() + ".fits"
+    else:
+        name_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:8]
+        name, ext = os.path.splitext(base_name)
+        if base_name.endswith(".fits.fz"):
+            base_name = f"{name[:-5]}_{name_hash}.fits.fz"
+        else:
+            base_name = f"{name}_{name_hash}{ext}"
+            
+    local_path = os.path.join(cache_dir, base_name)
+    
+    if not os.path.exists(local_path):
+        print(f"Downloading {url} to cache: {local_path}...")
+        try:
+            r = requests.get(url, stream=True)
+            r.raise_for_status()
+            with open(local_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print("Download complete.")
+        except Exception as e:
+            print(f"Cache download failed for {url} ({str(e)}). Falling back to direct fits.open...")
+            return fits.open(url, **kwargs)
+        
+    return fits.open(local_path, **kwargs)
+
+def _get_headers_from_url(url):
+    if url in _HEADER_CACHE:
+        return _HEADER_CACHE[url]
+    hdul = cached_fits_open(url)
+    try:
+        headers = [hdu.header.copy() for hdu in hdul]
+    finally:
+        if hasattr(hdul, "close"):
+            hdul.close()
+    _HEADER_CACHE[url] = headers
+    return headers
+
 
 
 class PipeStudy:
@@ -29,7 +83,7 @@ class PipeStudy:
 
     def __init__(self, telescope, instrument, exposure, filter,
                  max_returns=10):
-        # Method to instantiate PipeStudy object
+        """Method to instantiate PipeStudy object."""
         self.telescope = telescope
         self.instrument = instrument
         self.exposure = exposure
@@ -38,7 +92,7 @@ class PipeStudy:
         self.max_returns = max_returns
 
     def find_instcals(self):
-        # Method to find images that resulted from a processing pipeline
+        """Method to find images that resulted from a processing pipeline."""
         jj = {
             "outfields": [
                 "telescope",
@@ -137,12 +191,27 @@ class PipeFilePaths:
     """
     def __init__(self, raw_row, output_folder, study_name):
         self.raw_url = raw_row["url"].iloc[0]
-        raw_filename = raw_row["archive_filename"].iloc[0]
-        self.local_fits_path = output_folder + \
-            raw_filename.split("/")[-1].replace("ori", study_name)
-        self.pipe_file_path = output_folder + \
-            raw_filename.split("/")[-1].replace("ori.fits.fz",
-                                                study_name + "_pipe.csv")
+        raw_filename = raw_row["archive_filename"].iloc[0].split("/")[-1]
+        
+        # Determine base name and extension
+        if raw_filename.endswith(".fits.fz"):
+            base = raw_filename[:-8]
+            ext = ".fits.fz"
+        elif raw_filename.endswith(".fits"):
+            base = raw_filename[:-5]
+            ext = ".fits"
+        else:
+            import os
+            base, ext = os.path.splitext(raw_filename)
+            if not ext:
+                ext = ".fits"
+
+        if "ori" in base:
+            self.local_fits_path = output_folder + base.replace("ori", study_name) + ext
+            self.pipe_file_path = output_folder + base.replace("ori", study_name + "_pipe") + ".csv"
+        else:
+            self.local_fits_path = output_folder + base + "_" + study_name + ext
+            self.pipe_file_path = output_folder + base + "_" + study_name + "_pipe.csv"
 
 
 def find_precal_match(pipe_study_row, product_name):
@@ -162,14 +231,17 @@ def find_precal_match(pipe_study_row, product_name):
         that are related to the pipeline process for the specific processed
         image from the pipe_study_row.
     """
-    hdu = fits.open(pipe_study_row["url"])
-    hdr = hdu[0].header
+    url = pipe_study_row["url"]
+    if not isinstance(url, str):
+        url = str(url)
+    headers = _get_headers_from_url(url)
+    hdr = headers[0]
     this_instr = hdr["INSTRUME"]
     this_rawfile = hdr["RAWFILE"]
     this_propid = hdr["PROPID"]
     this_caldat = hdr["DTCALDAT"]
     this_filter = hdr["FILTER"]
-    this_dqmask = hdu[1].header["DQMASK"].split("[")[0]
+    this_dqmask = headers[1]["DQMASK"].split("[")[0]
 
     match product_name:
         case "raw":
@@ -288,7 +360,7 @@ def get_pipeline_df(pipe_study_row):
         return -1
 
 
-def query_2mass(center_ra, center_dec, width_ra, width_dec):
+def query_2mass(center_ra, center_dec, width_ra, width_dec, frame="fk5"):
     """
     Given a pair of FK5 sky coordinates and bidirectional angular subtense,
     query the 2MASS catalog for objects within the field of regard.
@@ -298,13 +370,14 @@ def query_2mass(center_ra, center_dec, width_ra, width_dec):
         center_dec (float): Declination angle in degrees.
         width_ra (float): Right Ascension field of view (degrees).
         width_dec (float): Declination field of view (degrees).
+        frame (str): Coordinate frame of the query.
 
     Returns:
         stars_df (pandas dataframe): Dataframe of stars and their coordinates.
     """
-    vizier = Vizier(columns=["*", "Ksnr"], catalog="II/246")
+    vizier = Vizier(columns=["*", "Ksnr"], catalog="II/246", row_limit=500)
     result = vizier.query_region(
-            SkyCoord(ra=center_ra, dec=center_dec, frame="fk5", unit="deg"),
+            SkyCoord(ra=center_ra, dec=center_dec, frame=frame, unit="deg"),
             width=width_ra * u.deg,
             height=width_dec * u.deg,
             )
@@ -321,7 +394,7 @@ def query_2mass(center_ra, center_dec, width_ra, width_dec):
     return stars_df
 
 
-def get_catalog_stars(pipeline_inst, catalog="SIMBAD"):
+def get_catalog_stars(pipeline_inst, catalog="SIMBAD", frame="icrs"):
     """
     Given a pipeline for processing a raw image, query the
     specified catalog for objects within the image's field of regard.
@@ -330,6 +403,7 @@ def get_catalog_stars(pipeline_inst, catalog="SIMBAD"):
         pipeline_inst (pandas data series): A single row of a PipeStudy
                                                 instcal_df.
         catalog (str): Name of the star catalog or database to use.
+        frame (str): Coordinate frame of the query.
 
     Returns:
         stars_df (pandas dataframe): Dataframe of stars and their coordinates.
@@ -360,21 +434,22 @@ def get_catalog_stars(pipeline_inst, catalog="SIMBAD"):
     center_dec = (width_dec) / 2 + min_dec
 
     if catalog == "SIMBAD":
-        sql = """SELECT TOP 50 oid, main_id, ra, dec
+        frame_str = frame.upper() if frame else "ICRS"
+        sql = """SELECT TOP 500 oid, main_id, ra, dec
                     FROM basic
-                    WHERE CONTAINS(POINT('ICRS', ra, dec), BOX('ICRS', {0},
-                                                        {1}, {2}, {3})) = 1
+                    WHERE CONTAINS(POINT('ICRS', ra, dec), BOX('{0}', {1},
+                                                         {2}, {3}, {4})) = 1
                     AND ra IS NOT NULL
                     AND dec IS NOT NULL;
             """.format(
-            center_ra, center_dec, width_ra, width_dec
+            frame_str, center_ra, center_dec, width_ra, width_dec
         )
 
         stars_df = Simbad.query_tap(query=sql, maxrec=10000).to_pandas()
 
     elif catalog == "2MASS":
-
-        stars_df = query_2mass(center_ra, center_dec, width_ra, width_dec)
+        frame_str = frame.lower() if frame else "fk5"
+        stars_df = query_2mass(center_ra, center_dec, width_ra, width_dec, frame=frame_str)
 
     return stars_df
 
