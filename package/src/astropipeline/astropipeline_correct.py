@@ -11,6 +11,7 @@ from astropy.wcs import WCS
 import scipy.ndimage as ndimage
 from scipy.spatial import ConvexHull
 from matplotlib.path import Path
+from package.src.astropipeline import astropipeline_gpu as apgpu
 
 
 
@@ -217,24 +218,41 @@ def heal_pixels(fits_image, method="mean", element_select=(-1)):
         if not ((index in element_select) | (-1 in element_select)):
             continue
 
+        is_array = False
         if isinstance(hdu.data, np.ndarray):
-            dq0_mask = np.isnan(hdu.data)  # invalid elements
+            is_array = True
+        elif apgpu.HAS_GPU and apgpu.cp is not None and isinstance(hdu.data, apgpu.cp.ndarray):
+            is_array = True
+
+        if is_array:
+            xp = apgpu.get_array_module(hdu.data)
+            dq0_mask = xp.isnan(hdu.data)  # invalid elements
             valid_elements = hdu.data[~dq0_mask]
 
             if method == "mean":
-                hdu.data[dq0_mask] = np.mean(valid_elements)
+                if len(valid_elements) > 0:
+                    mean_val = xp.mean(valid_elements)
+                else:
+                    mean_val = 0.0
+                hdu.data[dq0_mask] = mean_val
             elif method in ("linear", "quadratic"):
                 if method == "quadratic":
                     print("Quadratic interpolation not incorporated yet, using linear local mean fallback")
+                
+                hdu_data_cpu = apgpu.to_cpu(hdu.data)
                 from astropy.convolution import interpolate_replace_nans, Box2DKernel
                 kernel = Box2DKernel(5)
-                interpolated_data = interpolate_replace_nans(hdu.data, kernel, boundary="extend")
+                interpolated_data = interpolate_replace_nans(hdu_data_cpu, kernel, boundary="extend")
                 
                 remaining_nans = np.isnan(interpolated_data)
                 if np.any(remaining_nans):
-                    interpolated_data[remaining_nans] = np.mean(valid_elements)
+                    if len(valid_elements) > 0:
+                        mean_val = apgpu.to_cpu(xp.mean(valid_elements))
+                    else:
+                        mean_val = 0.0
+                    interpolated_data[remaining_nans] = mean_val
                 
-                healed_fits[index].data = interpolated_data
+                healed_fits[index].data = apgpu.to_gpu(interpolated_data) if xp != np else interpolated_data
 
     return healed_fits
 
@@ -348,12 +366,34 @@ def rectify_wcs(hdu, log_func=print):
     world_coords = target_wcs.pixel_to_world(x_flat, y_flat)
     x_old, y_old = wcs.world_to_pixel(world_coords)
     
-    resampled_data = ndimage.map_coordinates(
-        hdu.data,
-        [y_old.reshape(hdu.data.shape), x_old.reshape(hdu.data.shape)],
-        order=1,
-        cval=np.nan
-    )
+    if apgpu.HAS_GPU:
+        try:
+            data_gpu = apgpu.to_gpu(hdu.data)
+            y_old_gpu = apgpu.to_gpu(y_old.reshape(hdu.data.shape))
+            x_old_gpu = apgpu.to_gpu(x_old.reshape(hdu.data.shape))
+            cp_ndimage = apgpu.get_ndimage()
+            resampled_data_gpu = cp_ndimage.map_coordinates(
+                data_gpu,
+                [y_old_gpu, x_old_gpu],
+                order=1,
+                cval=np.nan
+            )
+            resampled_data = apgpu.to_cpu(resampled_data_gpu)
+        except Exception as e:
+            log_func(f"GPU map_coordinates in rectify_wcs failed, falling back to CPU: {str(e)}")
+            resampled_data = ndimage.map_coordinates(
+                hdu.data,
+                [y_old.reshape(hdu.data.shape), x_old.reshape(hdu.data.shape)],
+                order=1,
+                cval=np.nan
+            )
+    else:
+        resampled_data = ndimage.map_coordinates(
+            hdu.data,
+            [y_old.reshape(hdu.data.shape), x_old.reshape(hdu.data.shape)],
+            order=1,
+            cval=np.nan
+        )
     
     new_header = hdu.header.copy()
     for key in list(new_header.keys()):
@@ -498,12 +538,34 @@ def rectify_catalog(hdu, catalog_stars_df, log_func=print, offset=None):
     x_old = pts_img_grid[:, 0].reshape(hdu.data.shape)
     y_old = pts_img_grid[:, 1].reshape(hdu.data.shape)
     
-    resampled_data = ndimage.map_coordinates(
-        hdu.data,
-        [y_old, x_old],
-        order=1,
-        cval=np.nan
-    )
+    if apgpu.HAS_GPU:
+        try:
+            data_gpu = apgpu.to_gpu(hdu.data)
+            y_old_gpu = apgpu.to_gpu(y_old)
+            x_old_gpu = apgpu.to_gpu(x_old)
+            cp_ndimage = apgpu.get_ndimage()
+            resampled_data_gpu = cp_ndimage.map_coordinates(
+                data_gpu,
+                [y_old_gpu, x_old_gpu],
+                order=1,
+                cval=np.nan
+            )
+            resampled_data = apgpu.to_cpu(resampled_data_gpu)
+        except Exception as e:
+            log_func(f"GPU map_coordinates in rectify_catalog failed, falling back to CPU: {str(e)}")
+            resampled_data = ndimage.map_coordinates(
+                hdu.data,
+                [y_old, x_old],
+                order=1,
+                cval=np.nan
+            )
+    else:
+        resampled_data = ndimage.map_coordinates(
+            hdu.data,
+            [y_old, x_old],
+            order=1,
+            cval=np.nan
+        )
     
     # Region of successful rectification defined by the warped boundaries of the original image
     corners_img = np.array([
@@ -631,6 +693,39 @@ def rectify_image(hdu, method="wcs", catalog_stars_df=None, log_func=print, offs
 
 
 def fit_poly_2d(data, degree=7):
+    if apgpu.HAS_GPU:
+        try:
+            cp = apgpu.cp
+            data_gpu = apgpu.to_gpu(data)
+            ny, nx = data_gpu.shape
+            y, x = cp.indices((ny, nx))
+            mask = ~cp.isnan(data_gpu)
+            x_valid = x[mask]
+            y_valid = y[mask]
+            z_valid = data_gpu[mask]
+            
+            n_terms = (degree + 1) * (degree + 2) // 2
+            if len(z_valid) < n_terms:
+                degree = 0
+                
+            A = []
+            for i in range(degree + 1):
+                for j in range(degree + 1 - i):
+                    A.append((x_valid ** i) * (y_valid ** j))
+            A = cp.column_stack(A)
+            
+            coeff, _, _, _ = cp.linalg.lstsq(A, z_valid, rcond=None)
+            
+            background = cp.zeros((ny, nx))
+            idx = 0
+            for i in range(degree + 1):
+                for j in range(degree + 1 - i):
+                    background += coeff[idx] * (x ** i) * (y ** j)
+                    idx += 1
+            return apgpu.to_cpu(background)
+        except Exception as e:
+            print(f"GPU fit_poly_2d failed, falling back to CPU: {str(e)}")
+
     ny, nx = data.shape
     y, x = np.indices((ny, nx))
     mask = ~np.isnan(data)

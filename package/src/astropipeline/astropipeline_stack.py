@@ -7,6 +7,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from package.src.astropipeline import astropipeline_correct as aplc
+from package.src.astropipeline import astropipeline_gpu as apgpu
+
 
 def _process_single_frame(path, final_cal, cal_frames_flux, catalog_stars_df, bg_sub_method):
     hdul = fits.open(path)
@@ -99,31 +101,70 @@ def stack_images(
     t_start_sigma = time.time()
     data_stack = np.array([hdu.data for hdu in processed_hdus if isinstance(hdu.data, np.ndarray)])
     
-    if sigma_clip and len(data_stack) > 1:
-        threshold = 3.0
-        if isinstance(sigma_clip, (int, float)) and not isinstance(sigma_clip, bool):
-            threshold = sigma_clip
-        elif len(data_stack) < 5:
-            threshold = 1.0
+    if apgpu.HAS_GPU:
+        try:
+            cp = apgpu.cp
+            data_stack_cp = cp.asarray(data_stack)
+            if sigma_clip and len(data_stack_cp) > 1:
+                threshold = 3.0
+                if isinstance(sigma_clip, (int, float)) and not isinstance(sigma_clip, bool):
+                    threshold = sigma_clip
+                elif len(data_stack_cp) < 5:
+                    threshold = 1.0
+                    
+                mean = cp.nanmean(data_stack_cp, axis=0)
+                std = cp.nanstd(data_stack_cp, axis=0)
+                std[std == 0] = 1e-10
+                deviations = cp.abs(data_stack_cp - mean) / std
+                clip_mask = (deviations > threshold) | cp.isnan(data_stack_cp)
+                data_stack_clipped = cp.where(clip_mask, cp.nan, data_stack_cp)
+            else:
+                data_stack_clipped = cp.where(cp.isnan(data_stack_cp), cp.nan, data_stack_cp)
             
-        mean = np.nanmean(data_stack, axis=0)
-        std = np.nanstd(data_stack, axis=0)
-        std[std == 0] = 1e-10
-        deviations = np.abs(data_stack - mean) / std
-        mask = deviations > threshold
-        data_stack_masked = np.ma.masked_array(data_stack, mask=mask)
+            steps_timing["Sigma clipping"] = time.time() - t_start_sigma
+            
+            # 4. Stacking
+            t_start_stack = time.time()
+            if method == "mean":
+                stacked_data_cp = cp.nanmean(data_stack_clipped, axis=0)
+            else:
+                stacked_data_cp = cp.nanmedian(data_stack_clipped, axis=0)
+            
+            stacked_data = cp.asnumpy(stacked_data_cp)
+            steps_timing["Stacking"] = time.time() - t_start_stack
+            use_gpu_success = True
+        except Exception as e:
+            print(f"GPU stacking failed, falling back to CPU: {str(e)}")
+            use_gpu_success = False
     else:
-        data_stack_masked = np.ma.masked_array(data_stack, mask=np.zeros_like(data_stack, dtype=bool))
+        use_gpu_success = False
         
-    steps_timing["Sigma clipping"] = time.time() - t_start_sigma
-    
-    # 4. Stacking
-    t_start_stack = time.time()
-    if method == "mean":
-        stacked_data = np.ma.mean(data_stack_masked, axis=0).filled(np.nan)
-    else:
-        stacked_data = np.ma.median(data_stack_masked, axis=0).filled(np.nan)
-    steps_timing["Stacking"] = time.time() - t_start_stack
+    if not use_gpu_success:
+        if sigma_clip and len(data_stack) > 1:
+            threshold = 3.0
+            if isinstance(sigma_clip, (int, float)) and not isinstance(sigma_clip, bool):
+                threshold = sigma_clip
+            elif len(data_stack) < 5:
+                threshold = 1.0
+                
+            mean = np.nanmean(data_stack, axis=0)
+            std = np.nanstd(data_stack, axis=0)
+            std[std == 0] = 1e-10
+            deviations = np.abs(data_stack - mean) / std
+            mask = deviations > threshold
+            data_stack_masked = np.ma.masked_array(data_stack, mask=mask)
+        else:
+            data_stack_masked = np.ma.masked_array(data_stack, mask=np.zeros_like(data_stack, dtype=bool))
+            
+        steps_timing["Sigma clipping"] = time.time() - t_start_sigma
+        
+        # 4. Stacking
+        t_start_stack = time.time()
+        if method == "mean":
+            stacked_data = np.ma.mean(data_stack_masked, axis=0).filled(np.nan)
+        else:
+            stacked_data = np.ma.median(data_stack_masked, axis=0).filled(np.nan)
+        steps_timing["Stacking"] = time.time() - t_start_stack
     
     # 5. Flux Calibrate Stacked Image
     stacked_calibrated_success = False
