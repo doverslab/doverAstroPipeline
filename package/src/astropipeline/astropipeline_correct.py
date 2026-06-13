@@ -149,6 +149,7 @@ def image_uniformity_correct(
         balanced_fits[0].verify("fix+exception")
         balanced_fits[4].verify("fix+exception")
 
+        wat_df = pd.DataFrame()
         for index, hdu in enumerate(balanced_fits):
 
             if isinstance(hdu.data, np.ndarray):

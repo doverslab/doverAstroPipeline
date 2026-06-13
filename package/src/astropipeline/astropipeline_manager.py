@@ -7,9 +7,10 @@ from astropy.nddata import Cutout2D
 import numpy as np
 import matplotlib.pyplot as plt
 
-import astropipeline_correct as aplc
-import astropipeline_etl as aple
-import astropipeline_measure as aplm
+from package.src.astropipeline import astropipeline_correct as aplc
+from package.src.astropipeline import astropipeline_etl as aple
+from package.src.astropipeline import astropipeline_measure as aplm
+
 
 output_folder = './fits/'
 num_darks = 5
@@ -21,16 +22,7 @@ max_fits_results = 1
 study_output_path = output_folder+'apl_study_'+study_name+'.csv'
 
 
-if os.path.exists(study_output_path):
-    test_study_df = aple.get_study_file(study_output_path)
-else:
-    test_pipe_study = aple.pipeStudy(telescope="kp4m",
-                                     instrument="newfirm",
-                                     exposure=10,
-                                     filter="KXs",
-                                     max_returns=max_fits_results)
-    test_study_df = test_pipe_study.find_instcals()
-    test_study_df.to_csv(study_output_path)
+
 
 
 def correct_subpipe(study_df):
@@ -42,7 +34,7 @@ def correct_subpipe(study_df):
         raw_index = pipe_indexes[(pipeline_df['proc_type'] == 'raw') &
                                  (pipeline_df['obs_type'] == 'object')]
         raw_row = pipeline_df.iloc[raw_index]
-        pipe_paths = aple.pipe_file_paths(raw_row, output_folder, study_name)
+        pipe_paths = aple.PipeFilePaths(raw_row, output_folder, study_name)
 
         if os.path.exists(pipe_paths.local_fits_path):
             continue
@@ -173,8 +165,20 @@ def undistort_subpipe(study_df):
     return 0
 
 
-test_study_df = correct_subpipe(test_study_df)
+if __name__ == '__main__':
+    if os.path.exists(study_output_path):
+        test_study_df = aple.get_study_file(study_output_path)
+    else:
+        test_pipe_study = aple.PipeStudy(telescope="kp4m",
+                                         instrument="newfirm",
+                                         exposure=10,
+                                         filter="KXs",
+                                         max_returns=max_fits_results)
+        test_study_df = test_pipe_study.find_instcals()
+        test_study_df.to_csv(study_output_path)
 
-test_study_df = aple.get_study_file(study_output_path)
+    test_study_df = correct_subpipe(test_study_df)
 
-test_study_df = undistort_subpipe(test_study_df)
+    test_study_df = aple.get_study_file(study_output_path)
+
+    test_study_df = undistort_subpipe(test_study_df)

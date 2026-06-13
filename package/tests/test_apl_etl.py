@@ -167,7 +167,68 @@ def test_pipeline_includes_dqm(populated_pipeline: pd.DataFrame):
     )
 
 
-def test_get_stars(pipe_instance: pd.DataFrame):
+def test_get_stars_simbad(pipe_instance: pd.DataFrame):
     stars_df = aple.get_catalog_stars(pipe_instance, "SIMBAD")
     assert isinstance(stars_df, pd.DataFrame)
     assert len(stars_df) >= 1
+
+def test_get_stars_2mass(pipe_instance: pd.DataFrame):
+    # Mocking since it falls back to a different process
+    stars_df = aple.get_catalog_stars(pipe_instance, "2MASS")
+    assert isinstance(stars_df, pd.DataFrame)
+
+def test_pipe_file_paths():
+    row = pd.DataFrame([{"archive_filename": "test_ori.fits.fz", "url": "https://astroarchive.noirlab.edu/api/retrieve/test_ori.fits.fz/"}])
+    paths = aple.PipeFilePaths(row, "./fits/", "study")
+    assert paths.pipe_file_path == "./fits/test_study_pipe.csv"
+    assert paths.local_fits_path == "./fits/test_study.fits.fz"
+    assert paths.raw_url == "https://astroarchive.noirlab.edu/api/retrieve/test_ori.fits.fz/"
+
+def test_find_instcals_empty(empty_pipe_study):
+    # Mock requests.post to return empty results
+    with patch("package.src.astropipeline.astropipeline_etl.requests.post") as mock_post:
+        mock_post.return_value.json.return_value = [None]
+        df = empty_pipe_study.find_instcals()
+        assert len(df) == 0
+
+def test_get_pipeline_missing(populated_pipeline: pd.DataFrame):
+    # Test get_pipeline_df when it returns -1 due to missing files
+    row = populated_pipeline.iloc[0]
+    
+    # Actually get_pipeline_df queries the API via find_precal_match
+    # If API returns empty, it will return -1.
+    with patch("package.src.astropipeline.astropipeline_etl.requests.post") as mock_post:
+        # Return empty list
+        mock_post.return_value.json.return_value = []
+        res = aple.get_pipeline_df(row)
+        assert res == -1
+
+def test_get_pipeline_file(tmp_path):
+    df = pd.DataFrame([{"a": 1}])
+    p = tmp_path / "test_pipe.csv"
+    df.to_csv(p, index=False)
+    loaded = aple.get_pipeline_file(str(p))
+    assert loaded.iloc[0]["a"] == 1
+
+def test_get_study_file(tmp_path):
+    df = pd.DataFrame([{"b": 2}])
+    p = tmp_path / "test_study.csv"
+    df.to_csv(p, index=False)
+    loaded = aple.get_study_file(str(p))
+    assert loaded.iloc[0]["b"] == 2
+
+def test_find_precal_match_error(populated_pipeline):
+    row = populated_pipeline.iloc[0]
+    with patch("package.src.astropipeline.astropipeline_etl.requests.post") as mock_post:
+        mock_post.return_value.json.return_value = {"errorMessage": "Some error"}
+        res = aple.find_precal_match(row, "raw")
+        assert res == -1
+
+def test_find_precal_match_ambiguous(populated_pipeline):
+    row = populated_pipeline.iloc[0]
+    with patch("package.src.astropipeline.astropipeline_etl.requests.post") as mock_post:
+        mock_post.return_value.json.return_value = [None, {"url": "url1"}, {"url": "url2"}]
+        res = aple.find_precal_match(row, "raw")
+        assert res == -1
+
+

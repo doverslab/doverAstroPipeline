@@ -1,5 +1,5 @@
 import os
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import numpy as np
 import pandas as pd
 import pytest
@@ -31,6 +31,14 @@ def test_heal_pixels_linear(sample_fits_image):
     data = healed[0].data
     assert not np.isnan(data[1, 1])
     # Linear interpolation at the center should be 5.0
+    assert np.isclose(data[1, 1], 5.0)
+
+
+def test_heal_pixels_quadratic(sample_fits_image):
+    # The quadratic method just falls back to linear and prints a warning
+    healed = aplc.heal_pixels(sample_fits_image, method="quadratic", element_select=[-1])
+    data = healed[0].data
+    assert not np.isnan(data[1, 1])
     assert np.isclose(data[1, 1], 5.0)
 
 
@@ -128,11 +136,93 @@ def test_parse_wat_table():
     hdu = pyfits.PrimaryHDU()
     hdu.header['NAXIS'] = 1
     hdu.header['WAT1_001'] = 'wtype=linear axtype=ra '
-    hdu.header['WAT1_002'] = 'lngcor = "test_lng" '
+    hdu.header['WAT1_002'] = ' lngcor = "test_lng" '
     
     wat_df = aplc.parse_wat_table(hdu)
     assert len(wat_df) == 1
     assert wat_df.iloc[0]["wtype"] == "linear"
     assert wat_df.iloc[0]["axtype"] == "ra"
     assert wat_df.iloc[0]["dc_vals"] == "test_lng"
+
+
+@patch("package.src.astropipeline.astropipeline_correct.pyfits.open")
+def test_image_uniformity_correct(mock_fits_open, tmp_path):
+    # Ensure fits directory exists
+    os.makedirs("./fits", exist_ok=True)
+    
+    # Mocking fits HDU list
+    hdu0 = pyfits.PrimaryHDU()
+    hdu0.header["RADECSYS"] = "ICRS"
+    
+    # Create an image HDU with dummy WCS and data
+    hdu1 = pyfits.ImageHDU(np.ones((10, 10)) * 20.0)
+    # Give it some basic WCS keywords to not fail
+    hdu1.header['CTYPE1'] = 'RA---TAN'
+    hdu1.header['CTYPE2'] = 'DEC--TAN'
+    hdu1.header['CRVAL1'] = 0.0
+    hdu1.header['CRVAL2'] = 0.0
+    hdu1.header['CRPIX1'] = 5.0
+    hdu1.header['CRPIX2'] = 5.0
+    hdu1.header['CDELT1'] = 1.0
+    hdu1.header['CDELT2'] = 1.0
+    hdu1.header['WAT1_001'] = 'wtype=linear axtype=ra lngcor = "test_lng"'
+    hdu1.header['WAT2_001'] = 'wtype=linear axtype=dec latcor = "test_lat"'
+    
+    mock_hdulist = pyfits.HDUList([
+        hdu0,
+        pyfits.ImageHDU(),
+        pyfits.ImageHDU(),
+        pyfits.ImageHDU(),
+        hdu1
+    ])
+    # For updating the temp file
+    mock_hdulist.copy = MagicMock(return_value=mock_hdulist)
+    
+    # Context manager mock
+    mock_fits_open.return_value.__enter__.return_value = mock_hdulist
+    mock_fits_open.return_value = mock_hdulist
+
+    dark_means = {4: 10.0}
+    gain_vals = {4: np.ones((10, 10)) * 2.0}
+    crop_ranges = {4: np.ix_(range(10), range(10))}
+    
+    balanced = aplc.image_uniformity_correct("mock_url", dark_means, gain_vals, crop_ranges)
+    
+    # Data is (20.0 - 10.0) / 2.0 = 5.0
+    assert balanced[4].data[0, 0] == 5.0
+    assert "RADESYSa" in balanced[0].header
+
+
+@patch("package.src.astropipeline.astropipeline_correct.pyfits.open")
+@patch("package.src.astropipeline.astropipeline_correct.WCS")
+def test_image_uniformity_correct_wcs_error(mock_wcs, mock_fits_open, tmp_path):
+    os.makedirs("./fits", exist_ok=True)
+    mock_wcs.side_effect = Exception("Mock WCS error")
+    
+    hdu0 = pyfits.PrimaryHDU()
+    hdu0.header["RADECSYS"] = "ICRS"
+    
+    hdu1 = pyfits.ImageHDU(np.ones((10, 10)) * 20.0)
+    hdu1.header['WAT1_001'] = 'wtype=linear axtype=ra lngcor = "test_lng"'
+    hdu1.header['WAT2_001'] = 'wtype=linear axtype=dec latcor = "test_lat"'
+    
+    mock_hdulist = pyfits.HDUList([
+        hdu0,
+        pyfits.ImageHDU(),
+        pyfits.ImageHDU(),
+        pyfits.ImageHDU(),
+        hdu1
+    ])
+    mock_hdulist.copy = MagicMock(return_value=mock_hdulist)
+    
+    mock_fits_open.return_value.__enter__.return_value = mock_hdulist
+    mock_fits_open.return_value = mock_hdulist
+
+    dark_means = {4: 10.0}
+    gain_vals = {4: np.ones((10, 10)) * 2.0}
+    crop_ranges = {4: np.ix_(range(10), range(10))}
+    
+    balanced = aplc.image_uniformity_correct("mock_url", dark_means, gain_vals, crop_ranges)
+    assert len(balanced) == 4
+
 

@@ -86,15 +86,18 @@ class PipeStudy:
 
         # reduce df by removing skyflats (sflats) then only taking the
         #  requested amount
-        instcal_fits_df = (
-            instcal_fits_df[
-                ~instcal_fits_df["OBJECT"].str.contains("sflat",
-                                                        case=False,
-                                                        na="True")
-            ]
-            .head(self.max_returns)
-            .reset_index(drop=True)
-        )
+        if len(instcal_fits_df) == 0:
+            instcal_fits_df = pd.DataFrame(columns=jj["outfields"])
+        else:
+            instcal_fits_df = (
+                instcal_fits_df[
+                    ~instcal_fits_df["OBJECT"].str.contains("sflat",
+                                                            case=False,
+                                                            na="True")
+                ]
+                .head(self.max_returns)
+                .reset_index(drop=True)
+            )
 
         # initialize the fields for the output path and pipeline file path
         instcal_fits_df["out_path"] = None
@@ -250,7 +253,7 @@ def find_precal_match(pipe_study_row, product_name):
     if len(results_df) == 0:
         print("No " + product_name + "File(s) Found")
         return -1
-    elif product_name == ("raw", "dqmask") and len(results_df) > 1:
+    elif product_name in ("raw", "dqmask") and len(results_df) > 1:
         print("Ambiguous " + product_name + " Files Found (more than 1)")
         return -1
     else:
@@ -281,6 +284,8 @@ def get_pipeline_df(pipe_study_row):
                 return -1
 
         return pipe_df
+    else:
+        return -1
 
 
 def query_2mass(center_ra, center_dec, width_ra, width_dec):

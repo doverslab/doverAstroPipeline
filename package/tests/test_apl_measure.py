@@ -55,6 +55,12 @@ def test_measure_settings(tmp_path):
     settings = aplm.MeasureSettings()
     assert settings.psf_radius == 0.5
     
+    settings.psf_radius = 1.0
+    assert settings.psf_radius == 1.0
+    
+    settings.background_buffer = 10
+    assert settings.background_buffer == 10
+    
     file_path = tmp_path / "settings.yaml"
     settings.save_to_file(str(file_path))
     assert os.path.exists(str(file_path))
@@ -62,7 +68,7 @@ def test_measure_settings(tmp_path):
     new_settings = aplm.MeasureSettings()
     new_settings.psf_radius = 9.9
     new_settings.load_from_file(str(file_path))
-    assert new_settings.psf_radius == 0.5
+    assert new_settings.psf_radius == 1.0
 
 def test_crop_fits(test_fits):
     img = test_fits[0].data
@@ -156,3 +162,18 @@ def mock_star_fits(tmp_path):
 def test_extract_star_samples(mock_star_fits):
     # Just ensure it runs without exception
     aplm.extract_star_samples(mock_star_fits)
+
+def test_create_psf_exceptions():
+    with pytest.raises(IndexError):
+        aplm.create_psf(array_size=(0, 0))
+
+def test_get_centroid_exceptions():
+    # Make a flat image so there is no peak
+    img = np.zeros((10, 10))
+    r, c = aplm.get_centroid(img, (5, 5), extent=2)
+    assert np.isnan(r) and np.isnan(c)
+
+def test_wvlt_coarse_find_nomax(test_fits):
+    img = np.zeros((10, 10))
+    coords, passed = aplm.wvlt_coarse_find(img, lo_level=1, hi_level=1)
+    assert passed.shape == img.shape
