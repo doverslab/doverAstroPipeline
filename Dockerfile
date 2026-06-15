@@ -1,22 +1,29 @@
-FROM rockylinux:9.3.20231119-minimal
+FROM python:3.11-slim
 
-# Install Python
-RUN microdnf -y update
-RUN microdnf -y install python3
+# Install system dependencies
+# - python3-tk is required for Tkinter (guiDemo.py)
+# - libgomp1 is required for OpenMP (used by scipy/numpy)
+# - build-essential is useful if any pip dependencies need compilation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgomp1 \
+    python3-tk \
+    && rm -rf /var/lib/apt/lists/*
 
-# Set the working directory
+# Set working directory
 WORKDIR /app
 
-# Copy the requirements file (if you have one)
+# Copy dependency definition
 COPY requirements.txt ./
 
-# Install dependencies (if you have any)
-RUN microdnf -y install python3-pip
-RUN pip3 install -r requirements.txt
+# Install python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of your application code
-COPY images images
-COPY waveletTk.py .
+# Copy the application source code (filtered by .dockerignore)
+COPY . .
 
-# Specify the command to run when the container starts
-#CMD ["python3", "waveletTk.py"] 
+# Configure Python path so the package directory is discoverable
+ENV PYTHONPATH=/app
+
+# Default command: run the test suite
+CMD ["pytest"]

@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./fits:/app/fits
+      - ./test_settings.yaml:/app/test_settings.yaml
+    environment:
+      - PYTHONPATH=/app
+    command: python run_pipeline_trial.py
+
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - PYTHONPATH=/app
+    command: pytest
