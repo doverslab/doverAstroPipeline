@@ -5,6 +5,7 @@ import yaml
 import pywt
 from scipy import ndimage
 from astropy.io import fits
+import matplotlib.pyplot as plt
 
 
 class MeasureSettings:
@@ -889,6 +890,55 @@ def get_best_dog(img, min_layer: int = 0,
 
     return best_lvl
 
+def simple_hist(data, nbins=100, log_y=True, title=None, xlabel=None, ylabel=None, figsize=(10,8), save_path=None):
+    """
+    Convenience function, calculates and plots n-bin histogram
+
+    Args:
+        data (ndarray): A numpy nxm float array
+        nbins (int): Number of bins for histogram
+        log_y (bool): Whether to plot y-axis on log scale
+        title (str): Title of the histogram
+        xlabel (str): x-axis label
+        ylabel (str): y-axis label
+        figsize (tuple): Figure size
+        save_path (str): Path to save the histogram
+
+    Returns:
+        hist_counts (array): hist_counts per bin
+        bin_centers (array): bin centers
+    """
+    # Calculate histogram
+    data_arr = np.asarray(data)
+    clean_data = data_arr[np.isfinite(data_arr)]
+    
+    if len(clean_data) == 0:
+        hist_counts = np.zeros(nbins)
+        bin_centers = np.linspace(0, 1, nbins)
+        bin_width = 1.0 / nbins
+    else:
+        hist_counts, bin_edges = np.histogram(clean_data, bins=nbins)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        bin_width = bin_edges[1] - bin_edges[0]
+
+    # Plot histogram
+    plt.figure(figsize=figsize)
+    if len(clean_data) > 0:
+        plt.bar(bin_centers, hist_counts, width=bin_width)
+        if log_y:
+            plt.yscale("log")
+    if title:
+        plt.title(title)
+    if xlabel:
+        plt.xlabel(xlabel)
+    if ylabel:
+        plt.ylabel(ylabel)
+    if save_path:
+        plt.savefig(save_path)
+        print(f"Saved histogram to {save_path}")
+    plt.show()
+
+    return hist_counts, bin_centers
 
 def extract_star_samples(fits_path, extensions=-1, num_peaks=10):
     from astropy.io import fits

@@ -91,7 +91,7 @@ class PipeStudy:
         self.index = 0
         self.max_returns = max_returns
 
-    def find_instcals(self):
+    def find_instcals(self, proc_type="instcal"):
         """Method to find images that resulted from a processing pipeline."""
         jj = {
             "outfields": [
@@ -125,7 +125,7 @@ class PipeStudy:
             "search": [
                 ["telescope", self.telescope],
                 ["instrument", self.instrument],
-                ["proc_type", "instcal"],
+                ["proc_type", proc_type],
                 ["prod_type", "image"],
                 ["ifilter", self.filter],
                 ["exposure", self.exposure, self.exposure],

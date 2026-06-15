@@ -4,10 +4,19 @@ import numpy as np
 import pandas as pd
 import astropy.io.fits as fits
 import matplotlib
-matplotlib.use('Agg')
+try:
+    from IPython import get_ipython
+    if get_ipython() is None:
+        matplotlib.use('Agg')
+except ImportError:
+    matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from package.src.astropipeline import astropipeline_correct as aplc
 from package.src.astropipeline import astropipeline_gpu as apgpu
+from package.src.astropipeline import astropipeline_measure as aplm
+from astropy.wcs import WCS
+from astropy.coordinates import SkyCoord
+from astropy.nddata import Cutout2D
 
 
 def _process_single_frame(path, final_cal, cal_frames_flux, catalog_stars_df, bg_sub_method):
@@ -43,6 +52,36 @@ def _process_single_frame(path, final_cal, cal_frames_flux, catalog_stars_df, bg
     return img_hdu, local_calibrated_success
 
 
+def check_gaussian_chi2(data, alpha=0.05):
+    """
+    Check if the pixel values in data follow a Gaussian distribution
+    using a Chi-Squared goodness-of-fit test.
+    """
+    import scipy.stats as stats
+    clean_data = data[np.isfinite(data)]
+    if len(clean_data) < 20:
+        # Insufficient data to reject normality
+        return True
+        
+    mean = np.mean(clean_data)
+    std = np.std(clean_data)
+    if std == 0:
+        return False
+        
+    n_bins = 10
+    quantiles = np.linspace(0, 1, n_bins + 1)
+    
+    bin_edges = stats.norm.ppf(quantiles, loc=mean, scale=std)
+    bin_edges[0] = -np.inf
+    bin_edges[-1] = np.inf
+    
+    observed, _ = np.histogram(clean_data, bins=bin_edges)
+    expected = np.full(n_bins, len(clean_data) / n_bins)
+    
+    chi2_stat, p_val = stats.chisquare(observed, f_exp=expected, ddof=2)
+    return bool(p_val >= alpha)
+
+
 def stack_images(
     image_paths,
     method="median",
@@ -53,7 +92,9 @@ def stack_images(
     cal_frames_flux=False,
     catalog_stars_df=None,
     output_path="./fits/",
-    output_filename="stacked.fits"
+    output_filename="stacked.fits",
+    output_stats=False,
+    reject_non_gaussian=False
 ):
     start_time = time.time()
     steps_timing = {}
@@ -95,6 +136,37 @@ def stack_images(
                     frame_calibrated_success = True
         steps_timing["Calibration"] = time.time() - t_start_cal
         steps_timing["Background subtraction"] = 0.0
+
+    # 2. Gaussian Normality Check & Rejection
+    accepted_hdus = []
+    accepted_paths = []
+    rejected_paths = []
+    
+    for path, hdu in zip(image_paths, processed_hdus):
+        if reject_non_gaussian:
+            if isinstance(hdu.data, np.ndarray):
+                is_normal = check_gaussian_chi2(hdu.data)
+            else:
+                is_normal = False
+            
+            if is_normal:
+                accepted_hdus.append(hdu)
+                accepted_paths.append(path)
+            else:
+                rejected_paths.append(path)
+        else:
+            accepted_hdus.append(hdu)
+            accepted_paths.append(path)
+            
+    if reject_non_gaussian:
+        print(f"Normality check: accepted {len(accepted_hdus)}/{len(processed_hdus)} frames.")
+        if rejected_paths:
+            print(f"Rejected non-Gaussian frames: {rejected_paths}")
+            
+    if not accepted_hdus:
+        raise ValueError("All input frames were rejected because their pixel values do not have a Gaussian distribution.")
+        
+    processed_hdus = accepted_hdus
 
     
     # 3. Sigma Clipping
@@ -151,10 +223,10 @@ def stack_images(
             std = np.nanstd(data_stack, axis=0)
             std[std == 0] = 1e-10
             deviations = np.abs(data_stack - mean) / std
-            mask = deviations > threshold
+            mask = (deviations > threshold) | np.isnan(data_stack)
             data_stack_masked = np.ma.masked_array(data_stack, mask=mask)
         else:
-            data_stack_masked = np.ma.masked_array(data_stack, mask=np.zeros_like(data_stack, dtype=bool))
+            data_stack_masked = np.ma.masked_array(data_stack, mask=np.isnan(data_stack))
             
         steps_timing["Sigma clipping"] = time.time() - t_start_sigma
         
@@ -213,6 +285,17 @@ def stack_images(
     plt.savefig(preview_png_path, bbox_inches='tight')
     plt.close()
     
+    stats_png_path = None
+    if output_stats:
+        stats_png_filename = final_filename.replace(ext, "_stats.png")
+        stats_png_path = os.path.join(output_path, stats_png_filename)
+        aplm.simple_hist(
+            stacked_data,
+            save_path=stats_png_path,
+            title=f"Pixel Value Distribution ({method})"
+        )
+        plt.close()
+        
     log_lines = []
     log_lines.append("=== FITS Image Stacking Pipeline ===")
     log_lines.append(f"Time of Initial Request: {time.ctime(start_time)}")
@@ -224,9 +307,16 @@ def stack_images(
     log_lines.append(f"Calibrate Frames Flux: {cal_frames_flux} (Success: {frame_calibrated_success})")
     log_lines.append(f"Result Location: {dest_fits_path}")
     log_lines.append(f"Preview Location: {preview_png_path}")
+    if stats_png_path:
+        log_lines.append(f"Stats Location: {stats_png_path}")
     log_lines.append("\nInput Frames:")
-    for path in image_paths:
+    for path in accepted_paths:
         log_lines.append(f"  - {path}")
+        
+    if rejected_paths:
+        log_lines.append("\nRejected Non-Gaussian Frames:")
+        for path in rejected_paths:
+            log_lines.append(f"  - {path}")
         
     log_lines.append("\nStep Duration (seconds):")
     for step, duration in steps_timing.items():
@@ -255,4 +345,137 @@ def stack_images(
     with open(log_file_path, "w") as f:
         f.write("\n".join(log_lines) + "\n")
         
-    return image_paths, dest_fits_path, final_filename
+    return accepted_paths, dest_fits_path, final_filename
+
+
+def stack_single_object(
+    study_df,
+    ra,
+    dec,
+    crop_size=75,
+    catalog="2MASS",
+    method="catalog",
+    StackingMethod="median",
+    sigma_clip=True,
+    bg_sub_method="Wavelet Decomposition",
+    cal_stacked_flux=True,
+    cal_frames_flux=False,
+    output_path="./fits/",
+    output_filename="stacked_object.fits",
+    catalog_stars_df=None,
+    **kwargs
+):
+    """
+    Accomplish studying a single object by performing correction, rectification, 
+    calibration, cropping, and stacking.
+    
+    Parameters:
+    -----------
+    study_df : pandas.DataFrame
+        DataFrame representing the observations (from PipeStudy.find_instcals()).
+    ra : float
+        Right Ascension of the target object in degrees.
+    dec : float
+        Declination of the target object in degrees.
+    crop_size : int or tuple, default 75
+        Size of the crop in pixels.
+    catalog : str, default "2MASS"
+        Catalog to use for calibration and rectification.
+    method : str, default "catalog"
+        Method for rectification.
+    StackingMethod : str, default "median"
+        Stacking method ('median' or 'mean').
+    sigma_clip : bool or float, default True
+        Threshold or flag for sigma clipping.
+    bg_sub_method : str, default "Wavelet Decomposition"
+        Background subtraction method.
+    cal_stacked_flux : bool, default True
+        Calibrate final stacked image.
+    cal_frames_flux : bool, default False
+        Calibrate individual frames before stacking.
+    output_path : str, default "./fits/"
+        Output path directory.
+    output_filename : str, default "stacked_object.fits"
+        Output filename.
+    catalog_stars_df : pandas.DataFrame, optional
+        Pre-queried catalog stars. If None, queries them.
+    """
+    from package.src.astropipeline import astropipeline_manager as aplmgr
+    from package.src.astropipeline import astropipeline_etl as aple
+
+    # 1. Run the manager pipeline to process and crop the images
+    cropped_paths = aplmgr.study_single_object(
+        study_df=study_df,
+        ra=ra,
+        dec=dec,
+        crop_size=crop_size,
+        catalog=catalog,
+        method=method,
+        output_folder=output_path
+    )
+    
+    if not cropped_paths:
+        raise ValueError("No cropped frames were generated.")
+        
+    # 2. Get and filter catalog stars to the crop footprint
+    # Open one cropped frame to read WCS
+    hdul = fits.open(cropped_paths[0])
+    crop_hdu = None
+    for hdu in hdul:
+        if isinstance(hdu.data, np.ndarray) and hdu.data.ndim == 2:
+            crop_hdu = hdu
+            break
+    if crop_hdu is None:
+        crop_hdu = hdul[0]
+    crop_wcs = WCS(crop_hdu.header)
+    crop_shape = crop_hdu.data.shape
+    hdul.close()
+
+    if catalog_stars_df is None:
+        try:
+            stars_df = aple.get_catalog_stars(study_df.iloc[0], catalog=catalog)
+            valid_stars = []
+            for _, star in stars_df.iterrows():
+                coord = SkyCoord(star['ra'], star['dec'], unit='deg')
+                try:
+                    px, py = crop_wcs.world_to_pixel(coord)
+                    if 0 <= px < crop_shape[1] and 0 <= py < crop_shape[0]:
+                        valid_stars.append(star)
+                except Exception:
+                    continue
+            if valid_stars:
+                catalog_stars_df = pd.DataFrame(valid_stars)
+            else:
+                catalog_stars_df = pd.DataFrame()
+        except Exception as e:
+            print(f"Failed to query and filter catalog stars: {e}")
+            catalog_stars_df = pd.DataFrame()
+    else:
+        # Filter provided catalog stars to crop footprint
+        valid_stars = []
+        for _, star in catalog_stars_df.iterrows():
+            coord = SkyCoord(star['ra'], star['dec'], unit='deg')
+            try:
+                px, py = crop_wcs.world_to_pixel(coord)
+                if 0 <= px < crop_shape[1] and 0 <= py < crop_shape[0]:
+                    valid_stars.append(star)
+            except Exception:
+                continue
+        if valid_stars:
+            catalog_stars_df = pd.DataFrame(valid_stars)
+        else:
+            catalog_stars_df = pd.DataFrame()
+
+    # 3. Stack the cropped images
+    return stack_images(
+        image_paths=cropped_paths,
+        method=StackingMethod,
+        sigma_clip=sigma_clip,
+        bg_sub_method=bg_sub_method,
+        cal_stacked_flux=cal_stacked_flux,
+        cal_frames_flux=cal_frames_flux,
+        catalog_stars_df=catalog_stars_df,
+        output_path=output_path,
+        output_filename=output_filename,
+        **kwargs
+    )

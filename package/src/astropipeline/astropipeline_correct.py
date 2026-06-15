@@ -140,6 +140,8 @@ def parse_wat_table(hdu, wat_df=pd.DataFrame()):
 def image_uniformity_correct(
     raw_fits_image_url, dark_val_means, gain_vals, crop_ranges
 ):
+    import uuid
+    import os
 
     raw_fits = cached_fits_open(raw_fits_image_url)
     temp_fits = raw_fits.copy()
@@ -147,67 +149,78 @@ def image_uniformity_correct(
         temp_fits[0].header["RADESYSa"] = temp_fits[0].header["RADECSYS"]
         temp_fits[0].header.remove("RADECSYS")
 
-    temp_fits.writeto("./fits/temp.fits.fz", overwrite=True)
+    temp_dir = "./fits"
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_filename = os.path.join(temp_dir, f"temp_{os.getpid()}_{uuid.uuid4().hex}.fits.fz")
 
-    with pyfits.open("./fits/temp.fits.fz", update=True) as raw_fits:
+    temp_fits.writeto(temp_filename, overwrite=True)
 
-        balanced_fits = raw_fits.copy()
+    try:
+        with pyfits.open(temp_filename, update=True, memmap=False) as raw_fits:
 
-        balanced_fits[0].verify("fix+exception")
-        balanced_fits[4].verify("fix+exception")
+            balanced_fits = raw_fits.copy()
 
-        wat_df = pd.DataFrame()
-        for index, hdu in enumerate(balanced_fits):
+            balanced_fits[0].verify("fix+exception")
+            balanced_fits[4].verify("fix+exception")
 
-            if isinstance(hdu.data, np.ndarray):
+            wat_df = pd.DataFrame()
+            for index, hdu in enumerate(balanced_fits):
 
-                if index > 1:
-                    wat_df = parse_wat_table(hdu, wat_df)
-                else:
-                    wat_df = parse_wat_table(hdu)
+                if isinstance(hdu.data, np.ndarray):
 
-                try:
-                    wcs = WCS(hdu.header)
-                except:
-                    print(
-                        "OH NO ---- BIG PROBLEMS WITH WCS FOR EXTENSION: " +
-                        str(index)
+                    if index > 1:
+                        wat_df = parse_wat_table(hdu, wat_df)
+                    else:
+                        wat_df = parse_wat_table(hdu)
+
+                    try:
+                        wcs = WCS(hdu.header)
+                    except:
+                        print(
+                            "OH NO ---- BIG PROBLEMS WITH WCS FOR EXTENSION: " +
+                            str(index)
+                        )
+                        balanced_fits.pop(index)
+                        continue
+
+                    # Update the FITS header with the cutout WCS
+                    balanced_fits[index].data = (
+                        hdu.data[crop_ranges[index]] - dark_val_means[index]
+                    ) / gain_vals[index]
+
+                    balanced_fits[index].data[gain_vals[index] == 0] = 0
+                    min_row = min(crop_ranges[index][0])[0]
+                    max_row = max(crop_ranges[index][0])[0]
+                    min_col = min(crop_ranges[index][1][0])
+                    max_col = max(crop_ranges[index][1][0])
+
+                    position = ((max_row - min_row) / 2, (max_col - min_col) / 2)
+                    size = (max_row - min_row, max_col - min_col)
+
+                    cutout = Cutout2D(
+                        hdu.data,
+                        wcs.pixel_to_world(position[0], position[1]),
+                        size,
+                        mode="trim",
+                        wcs=wcs,
                     )
-                    balanced_fits.pop(index)
-                    continue
 
-                # Update the FITS header with the cutout WCS
-                balanced_fits[index].data = (
-                    hdu.data[crop_ranges[index]] - dark_val_means[index]
-                ) / gain_vals[index]
+                    balanced_fits[index].data = cutout.data
+                    balanced_fits[index].header = cutout.wcs.to_header()
 
-                balanced_fits[index].data[gain_vals[index] == 0] = 0
-                min_row = min(crop_ranges[index][0])[0]
-                max_row = max(crop_ranges[index][0])[0]
-                min_col = min(crop_ranges[index][1][0])
-                max_col = max(crop_ranges[index][1][0])
+            fix_exception = balanced_fits[0].verify(option="fix+exception")
 
-                position = ((max_row - min_row) / 2, (max_col - min_col) / 2)
-                size = (max_row - min_row, max_col - min_col)
+            print(fix_exception)
 
-                cutout = Cutout2D(
-                    hdu.data,
-                    wcs.pixel_to_world(position[0], position[1]),
-                    size,
-                    mode="trim",
-                    wcs=wcs,
-                )
+            balanced_fits[0].update_header()
 
-                balanced_fits[index].data = cutout.data
-                balanced_fits[index].header = cutout.wcs.to_header()
-
-        fix_exception = balanced_fits[0].verify(option="fix+exception")
-
-        print(fix_exception)
-
-        balanced_fits[0].update_header()
-
-        return balanced_fits
+            return balanced_fits
+    finally:
+        if os.path.exists(temp_filename):
+            try:
+                os.remove(temp_filename)
+            except Exception as e:
+                print(f"Warning: failed to remove temp file {temp_filename}: {str(e)}")
 
 
 def heal_pixels(fits_image, method="mean", element_select=(-1)):
@@ -693,16 +706,29 @@ def rectify_image(hdu, method="wcs", catalog_stars_df=None, log_func=print, offs
 
 
 def fit_poly_2d(data, degree=7):
+    ny, nx = data.shape
+    # Subsample data if it is large to reduce memory and CPU/GPU usage
+    num_pixels = data.size
+    if num_pixels > 50000:
+        step = int(np.ceil(np.sqrt(num_pixels / 30000)))
+    else:
+        step = 1
+
     if apgpu.HAS_GPU:
         try:
             cp = apgpu.cp
             data_gpu = apgpu.to_gpu(data)
-            ny, nx = data_gpu.shape
-            y, x = cp.indices((ny, nx))
-            mask = ~cp.isnan(data_gpu)
-            x_valid = x[mask]
-            y_valid = y[mask]
-            z_valid = data_gpu[mask]
+            
+            data_sub = data_gpu[::step, ::step]
+            sub_ny, sub_nx = data_sub.shape
+            y_sub, x_sub = cp.indices((sub_ny, sub_nx))
+            x_sub = (x_sub * step).astype(cp.float64)
+            y_sub = (y_sub * step).astype(cp.float64)
+            
+            mask = ~cp.isnan(data_sub)
+            x_valid = x_sub[mask]
+            y_valid = y_sub[mask]
+            z_valid = data_sub[mask]
             
             n_terms = (degree + 1) * (degree + 2) // 2
             if len(z_valid) < n_terms:
@@ -716,22 +742,29 @@ def fit_poly_2d(data, degree=7):
             
             coeff, _, _, _ = cp.linalg.lstsq(A, z_valid, rcond=None)
             
-            background = cp.zeros((ny, nx))
+            y_full, x_full = cp.indices((ny, nx))
+            x_full = x_full.astype(cp.float64)
+            y_full = y_full.astype(cp.float64)
+            background_gpu = cp.zeros((ny, nx))
             idx = 0
             for i in range(degree + 1):
                 for j in range(degree + 1 - i):
-                    background += coeff[idx] * (x ** i) * (y ** j)
+                    background_gpu += coeff[idx] * (x_full ** i) * (y_full ** j)
                     idx += 1
-            return apgpu.to_cpu(background)
+            return apgpu.to_cpu(background_gpu)
         except Exception as e:
             print(f"GPU fit_poly_2d failed, falling back to CPU: {str(e)}")
 
-    ny, nx = data.shape
-    y, x = np.indices((ny, nx))
-    mask = ~np.isnan(data)
-    x_valid = x[mask]
-    y_valid = y[mask]
-    z_valid = data[mask]
+    data_sub = data[::step, ::step]
+    sub_ny, sub_nx = data_sub.shape
+    y_sub, x_sub = np.indices((sub_ny, sub_nx))
+    x_sub = (x_sub * step).astype(np.float64)
+    y_sub = (y_sub * step).astype(np.float64)
+    
+    mask = ~np.isnan(data_sub)
+    x_valid = x_sub[mask]
+    y_valid = y_sub[mask]
+    z_valid = data_sub[mask]
     
     n_terms = (degree + 1) * (degree + 2) // 2
     if len(z_valid) < n_terms:
@@ -745,11 +778,14 @@ def fit_poly_2d(data, degree=7):
     
     coeff, _, _, _ = np.linalg.lstsq(A, z_valid, rcond=None)
     
+    y_full, x_full = np.indices((ny, nx))
+    x_full = x_full.astype(np.float64)
+    y_full = y_full.astype(np.float64)
     background = np.zeros((ny, nx))
     idx = 0
     for i in range(degree + 1):
         for j in range(degree + 1 - i):
-            background += coeff[idx] * (x ** i) * (y ** j)
+            background += coeff[idx] * (x_full ** i) * (y_full ** j)
             idx += 1
     return background
 

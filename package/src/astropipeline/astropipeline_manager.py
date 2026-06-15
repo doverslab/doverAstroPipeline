@@ -384,6 +384,111 @@ def calibrate_flux_subpipe(study_df, catalog="2MASS"):
     return study_df
 
 
+def study_single_object(study_df, ra, dec, crop_size=75, catalog="2MASS", method="catalog", output_folder=output_folder, study_name=study_name):
+    """
+    Perform standard correction, rectification, and calibration on each frame,
+    then crop a given pixel-based area (default 75x75 pixels) around the object (specified by ra, dec).
+    
+    Parameters:
+    -----------
+    study_df : pandas.DataFrame
+        DataFrame representing the observations (from PipeStudy.find_instcals()).
+    ra : float
+        Right Ascension of the target object in degrees.
+    dec : float
+        Declination of the target object in degrees.
+    crop_size : int or tuple/list of int, default 75
+        Size of the crop in pixels. If an integer is provided, crops a square of shape (crop_size, crop_size).
+    catalog : str, default "2MASS"
+        Catalog to use for rectification/flux calibration.
+    method : str, default "catalog"
+        Method for rectification ('catalog' or 'wcs').
+    output_folder : str, default output_folder
+        Output directory folder.
+    study_name : str, default study_name
+        Study name to append to study files.
+        
+    Returns:
+    --------
+    cropped_paths : list of str
+        List of paths to the saved cropped FITS files.
+    """
+    # 1. Run correction
+    study_df = correct_subpipe(study_df)
+    
+    # 2. Run rectification
+    study_df = undistort_subpipe(study_df, method=method, catalog=catalog)
+    
+    # 3. Run calibration
+    study_df = calibrate_flux_subpipe(study_df, catalog=catalog)
+    
+    # Ensure crop_size is a tuple of (ny, nx)
+    if isinstance(crop_size, int):
+        size = (crop_size, crop_size)
+    else:
+        size = tuple(crop_size)
+        
+    coord = SkyCoord(ra, dec, unit="deg")
+    cropped_paths = []
+    
+    for idx, row in study_df.iterrows():
+        in_path = row.get("calibrated_path") or row.get("rectified_path") or row.get("out_path")
+        if not in_path or not os.path.exists(in_path):
+            print(f"Preprocessed file {in_path} does not exist. Skipping crop.")
+            continue
+            
+        base, ext = os.path.splitext(in_path)
+        crop_path = f"{base}_crop{ext}"
+        
+        fits_in = fits.open(in_path)
+        hdus_cropped = fits.HDUList()
+        
+        has_crop = False
+        
+        for index, hdu in enumerate(fits_in):
+            if isinstance(hdu, (fits.hdu.image.PrimaryHDU, fits.PrimaryHDU)) and (hdu.data is None or hdu.data.size == 0):
+                hdus_cropped.append(hdu.copy())
+                continue
+                
+            if isinstance(hdu.data, np.ndarray) and hdu.data.ndim == 2:
+                wcs = WCS(hdu.header)
+                try:
+                    # Perform crop using Cutout2D
+                    cutout = Cutout2D(hdu.data, coord, size, wcs=wcs, mode='partial', fill_value=np.nan)
+                    
+                    # Create new HDU for cropped data
+                    if isinstance(hdu, fits.PrimaryHDU):
+                        new_hdu = fits.PrimaryHDU(data=cutout.data, header=hdu.header.copy())
+                    else:
+                        new_hdu = fits.ImageHDU(data=cutout.data, header=hdu.header.copy())
+                        
+                    # Update header with cutout WCS
+                    new_hdu.header.update(cutout.wcs.to_header())
+                    hdus_cropped.append(new_hdu)
+                    has_crop = True
+                except Exception as e:
+                    # Discard if it does not overlap or fails to crop
+                    pass
+            else:
+                pass
+                
+        fits_in.close()
+        
+        if has_crop:
+            hdus_cropped.writeto(crop_path, overwrite=True, output_verify="ignore")
+            hdus_cropped.close()
+            study_df.loc[idx, 'cropped_path'] = crop_path
+            cropped_paths.append(crop_path)
+        else:
+            hdus_cropped.close()
+            print(f"Warning: frame {in_path} does not contain target coordinate. Discarding from study.")
+            
+    # Write updated study_df
+    study_df.to_csv(study_output_path)
+    print(f"Study details with crops saved to: {study_output_path}")
+    return cropped_paths
+
+
 if __name__ == '__main__':
     if os.path.exists(study_output_path):
         test_study_df = aple.get_study_file(study_output_path)

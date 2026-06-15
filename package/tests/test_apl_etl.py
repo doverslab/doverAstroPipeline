@@ -99,6 +99,18 @@ def test_find_instcals(empty_pipe_study: aple.PipeStudy):
     assert len(filled_pipe_study) >= 1
 
 
+def test_find_instcals_proc_type(empty_pipe_study: aple.PipeStudy):
+    with patch("package.src.astropipeline.astropipeline_etl.requests.post") as mock_post:
+        mock_post.return_value.json.return_value = [None, {"OBJECT": "obj", "url": "url", "prod_type": "image", "proc_type": "stack"}]
+        df_stack = empty_pipe_study.find_instcals(proc_type="stack")
+        assert len(df_stack) > 0
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        json_data = kwargs.get("json", {})
+        search_params = {item[0]: item[1] for item in json_data.get("search", [])}
+        assert search_params.get("proc_type") == "stack"
+
+
 @pytest.fixture(scope="module")
 def populated_study(empty_pipe_study: aple.PipeStudy):
     filled_study = empty_pipe_study

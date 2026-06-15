@@ -1,3 +1,7 @@
-./.venv/
-./fits
-./images
+.venv/
+fits/
+images/
+package/dev_notebooks/fits/
+package/src/astropipeline/__pycache__
+package/tests/__pycache__
+package/docs/__pycache__

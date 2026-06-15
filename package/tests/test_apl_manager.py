@@ -220,3 +220,52 @@ def test_manager_main_block():
 
         mock_pipestudy_inst.find_instcals.assert_called_once()
 
+
+@patch("package.src.astropipeline.astropipeline_manager.correct_subpipe")
+@patch("package.src.astropipeline.astropipeline_manager.undistort_subpipe")
+@patch("package.src.astropipeline.astropipeline_manager.calibrate_flux_subpipe")
+@patch("package.src.astropipeline.astropipeline_manager.fits.open")
+@patch("package.src.astropipeline.astropipeline_manager.os.path.exists")
+def test_study_single_object(
+    mock_exists, mock_fits_open, mock_calibrate, mock_undistort, mock_correct, mock_study_df
+):
+    mock_exists.return_value = True
+    
+    proc_df = mock_study_df.copy()
+    proc_df["calibrated_path"] = "mock_calibrated.fits"
+    mock_correct.return_value = proc_df
+    mock_undistort.return_value = proc_df
+    mock_calibrate.return_value = proc_df
+    
+    hdr = fits.Header()
+    hdr["RADESYS"] = "ICRS"
+    hdr["CTYPE1"] = "RA---TAN"
+    hdr["CTYPE2"] = "DEC--TAN"
+    hdr["CRVAL1"] = 10.0
+    hdr["CRVAL2"] = 20.0
+    hdr["CRPIX1"] = 25.0
+    hdr["CRPIX2"] = 25.0
+    hdr["CDELT1"] = -0.0001
+    hdr["CDELT2"] = 0.0001
+    
+    mock_img_hdu = fits.PrimaryHDU(data=np.ones((50, 50)), header=hdr)
+    mock_hdulist = fits.HDUList([mock_img_hdu])
+    mock_fits_open.return_value = mock_hdulist
+    
+    with patch("astropy.io.fits.HDUList.writeto") as mock_writeto, \
+         patch("pandas.DataFrame.to_csv") as mock_to_csv:
+        cropped_paths = aplmgr.study_single_object(
+            study_df=mock_study_df.copy(),
+            ra=10.0,
+            dec=20.0,
+            crop_size=10,
+            output_folder="mock_folder",
+            study_name="mock_study"
+        )
+        
+    assert len(cropped_paths) == 1
+    assert cropped_paths[0] == "mock_calibrated_crop.fits"
+    mock_fits_open.assert_called_once_with("mock_calibrated.fits")
+    mock_writeto.assert_called_once()
+
+
